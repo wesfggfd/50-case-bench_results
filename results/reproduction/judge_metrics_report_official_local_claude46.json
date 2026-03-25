@@ -1,0 +1,43 @@
+{
+  "model": "claude-sonnet-4-6",
+  "api_url": "https://aiapi.cxyquan.com/v1/messages",
+  "notes": [
+    "Object/Motion were evaluated locally with 8 uniformly sampled rendered frames on official_rerun outputs.",
+    "Official manifest contains only successful text-task outputs from official_rerun.",
+    "Existing valid remote official cache entries were reused before local re-evaluation."
+  ],
+  "metrics": {
+    "real": {
+      "Text-to-Lottie": {
+        "count": 147,
+        "object_alignment": 3.210884,
+        "motion_alignment": 3.986395,
+        "evaluated_count_obj": 147,
+        "evaluated_count_motion": 147
+      },
+      "Text-Image-to-Lottie": {
+        "count": 144,
+        "object_alignment": 3.847222,
+        "motion_alignment": 4.3125,
+        "evaluated_count_obj": 144,
+        "evaluated_count_motion": 144
+      }
+    },
+    "synthetic": {
+      "Text-to-Lottie": {
+        "count": 150,
+        "object_alignment": 3.933333,
+        "motion_alignment": 2.933333,
+        "evaluated_count_obj": 150,
+        "evaluated_count_motion": 150
+      },
+      "Text-Image-to-Lottie": {
+        "count": 150,
+        "object_alignment": 5.226667,
+        "motion_alignment": 2.846667,
+        "evaluated_count_obj": 150,
+        "evaluated_count_motion": 150
+      }
+    }
+  }
+}
