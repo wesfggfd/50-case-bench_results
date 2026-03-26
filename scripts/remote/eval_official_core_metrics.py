@@ -25,6 +25,7 @@ from PIL import Image
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 from torchvision.transforms import CenterCrop, Compose, Normalize, Resize, ToTensor
 
+from lottie.exporters.cairo import export_png
 from lottie.exporters.video import export_video
 from lottie.parsers.tgs import parse_tgs
 
@@ -56,11 +57,8 @@ MML2M_GLOB = '/root/SVG Generation/downloads/datasets/MMLottie-2M/data/**/*.parq
 RENDER_CACHE = Path('/root/SVG Generation/results/render_cache_official')
 FVD_CACHE = Path('/root/SVG Generation/results/fvd_cache')
 REPORT_PATH = Path('/root/SVG Generation/OmniLottie/reproduction_results/core_metrics_report.json')
-GT_STATS_PATH = FVD_CACHE / 'mmlottie2m_seed42_15pct_i3d_stats.npz'
-GT_META_PATH = FVD_CACHE / 'mmlottie2m_seed42_15pct_i3d_stats.json'
 I3D_URL = 'https://www.dropbox.com/s/ge9e5ujwgetktms/i3d_torchscript.pt?dl=1'
 MODEL_CACHE_DIR = '/root/SVG Generation/OmniLottie/loaded_models'
-SAMPLE_FRAC = 0.15
 SAMPLE_SEED = 42
 NUM_FRAMES = 16
 FRAME_SIZE = 224
@@ -132,7 +130,12 @@ def load_video_frames_cv2(path: str, num_frames: int = NUM_FRAMES, size: int = F
     idx = np.linspace(0, len(frames) - 1, num_frames).astype(int)
     picked = []
     for i in idx:
-        img = Image.fromarray(frames[i]).convert('RGB').resize((size, size))
+        img = Image.fromarray(frames[i]).convert('RGB')
+        if size is not None:
+            if isinstance(size, tuple):
+                img = img.resize(size)
+            else:
+                img = img.resize((size, size))
         picked.append(np.array(img))
     return np.stack(picked)
 
@@ -150,14 +153,47 @@ def load_video_frames_from_bytes(video_bytes: bytes, num_frames: int = NUM_FRAME
             pass
 
 
-def load_video_frames_from_field(video_field) -> np.ndarray:
+def load_video_frames_from_field(video_field, num_frames: int = NUM_FRAMES, size: int | tuple[int, int] | None = FRAME_SIZE) -> np.ndarray:
     if isinstance(video_field, dict) and video_field.get('bytes') is not None:
-        return load_video_frames_from_bytes(video_field['bytes'])
+        return load_video_frames_from_bytes(video_field['bytes'], num_frames=num_frames, size=size)
     if isinstance(video_field, dict) and video_field.get('path'):
-        return load_video_frames_cv2(video_field['path'])
+        return load_video_frames_cv2(video_field['path'], num_frames=num_frames, size=size)
     if isinstance(video_field, bytes):
-        return load_video_frames_from_bytes(video_field)
+        return load_video_frames_from_bytes(video_field, num_frames=num_frames, size=size)
     raise ValueError('Video field does not contain bytes/path')
+
+
+def composite_on_background(img: Image.Image, background=(255, 255, 255)) -> Image.Image:
+    if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+        rgba = img.convert('RGBA')
+        base = Image.new('RGB', rgba.size, background)
+        base.paste(rgba, mask=rgba.getchannel('A'))
+        return base
+    return img.convert('RGB')
+
+
+def render_sampled_lottie_frames(
+    json_path: Path,
+    num_frames: int = NUM_FRAMES,
+    target_size: tuple[int, int] | None = None,
+    background=(255, 255, 255),
+) -> np.ndarray:
+    anim = parse_tgs(str(json_path))
+    start = int(anim.in_point)
+    end = int(anim.out_point)
+    frame_ids = np.linspace(start, end, num_frames).astype(int)
+    picked = []
+    for frame_id in frame_ids:
+        buf = io.BytesIO()
+        export_png(anim, buf, frame=frame_id)
+        buf.seek(0)
+        img = composite_on_background(Image.open(buf), background=background)
+        if target_size is not None:
+            img = img.resize(target_size)
+        picked.append(np.array(img))
+    if not picked:
+        raise ValueError(f'No rendered frames from {json_path}')
+    return np.stack(picked)
 
 
 def ensure_render(split: str, task_key: str, sample_id: str, result_dir: Path) -> Path:
@@ -235,13 +271,13 @@ def parquet_paths_and_counts():
     return paths, counts
 
 
-def iter_sampled_gt_video_fields(max_items: int | None = None):
+def iter_sampled_gt_video_fields(target_count: int):
     paths, counts = parquet_paths_and_counts()
     total = sum(counts)
-    sample_size = int(total * SAMPLE_FRAC)
+    if target_count <= 0:
+        return
+    sample_size = min(target_count, total)
     selected = sorted(random.Random(SAMPLE_SEED).sample(range(total), sample_size))
-    if max_items is not None:
-        selected = selected[:max_items]
     pointer = 0
     global_row = 0
     for path, row_count in zip(paths, counts):
@@ -277,10 +313,19 @@ def load_stats(path: Path):
     }
 
 
-def compute_gt_stats(device: str, force: bool = False, max_items: int | None = None):
-    if GT_STATS_PATH.exists() and not force and max_items is None:
-        print('Using cached GT stats', GT_STATS_PATH)
-        return load_stats(GT_STATS_PATH)
+def gt_stats_paths(target_count: int):
+    stem = f'mmlottie2m_seed{SAMPLE_SEED}_count{target_count}_i3d_stats'
+    return FVD_CACHE / f'{stem}.npz', FVD_CACHE / f'{stem}.json'
+
+
+def compute_gt_stats(device: str, target_count: int, force: bool = False):
+    gt_stats_path, gt_meta_path = gt_stats_paths(target_count)
+    if gt_stats_path.exists() and not force:
+        print('Using cached GT stats', gt_stats_path)
+        cached = load_stats(gt_stats_path)
+        meta = json.loads(gt_meta_path.read_text(encoding='utf-8')) if gt_meta_path.exists() else {}
+        cached['meta'] = meta
+        return cached
     detector = get_detector(device)
     stats = RunningStats()
     clips = []
@@ -288,7 +333,7 @@ def compute_gt_stats(device: str, force: bool = False, max_items: int | None = N
     failed = 0
     total_available = None
     total_rows = None
-    for video_field, global_index, sample_total, dataset_total in iter_sampled_gt_video_fields(max_items=max_items):
+    for video_field, global_index, sample_total, dataset_total in iter_sampled_gt_video_fields(target_count=target_count):
         total_available = sample_total
         total_rows = dataset_total
         try:
@@ -308,7 +353,6 @@ def compute_gt_stats(device: str, force: bool = False, max_items: int | None = N
         update_stats_from_clip_tensors(stats, detector, device, clips)
     meta = {
         'source': 'MMLottie-2M',
-        'sample_fraction': SAMPLE_FRAC,
         'sample_seed': SAMPLE_SEED,
         'dataset_total_rows': total_rows,
         'sample_target_count': total_available,
@@ -318,10 +362,9 @@ def compute_gt_stats(device: str, force: bool = False, max_items: int | None = N
         'frame_size': FRAME_SIZE,
         'device': device,
     }
-    if max_items is None:
-        save_stats(GT_STATS_PATH, stats, meta)
-        GT_META_PATH.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-        print('WROTE', GT_STATS_PATH)
+    save_stats(gt_stats_path, stats, meta)
+    gt_meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    print('WROTE', gt_stats_path)
     return {'mean': stats.mean, 'cov': stats.covariance(), 'count': stats.count, 'meta': meta}
 
 
@@ -416,18 +459,27 @@ def compute_video_pair_metrics(split: str, task_key: str, rows, device: str):
         if not (result_dir / f'{sample_id}.json').exists():
             continue
         try:
-            render_path = ensure_render(split, task_key, sample_id, result_dir)
-            gen_frames = load_video_frames_cv2(str(render_path))
-            ref_frames = load_video_frames_from_field(row['video'])
-            length = min(len(gen_frames), len(ref_frames))
-            gen_frames = gen_frames[:length]
-            ref_frames = ref_frames[:length]
+            ref_frames = load_video_frames_from_field(row['video'], size=None)
+            target_size = (ref_frames.shape[2], ref_frames.shape[1])
+            gen_frames = render_sampled_lottie_frames(
+                result_dir / f'{sample_id}.json',
+                num_frames=len(ref_frames),
+                target_size=target_size,
+                background=(255, 255, 255),
+            )
             local_psnr = []
             local_ssim = []
             for gen_frame, ref_frame in zip(gen_frames, ref_frames):
-                local_psnr.append(peak_signal_noise_ratio(ref_frame, gen_frame, data_range=255))
-                local_ssim.append(structural_similarity(ref_frame, gen_frame, channel_axis=2, data_range=255))
-            psnrs.append(float(sum(local_psnr) / len(local_psnr)))
+                gen_float = gen_frame.astype(np.float32) / 255.0
+                ref_float = ref_frame.astype(np.float32) / 255.0
+                local_psnr.append(peak_signal_noise_ratio(ref_float, gen_float, data_range=1.0))
+                local_ssim.append(structural_similarity(ref_float, gen_float, data_range=1.0, channel_axis=2))
+            # Per-sample PSNR: average only over frames with finite PSNR; omit inf (e.g. MSE=0).
+            psnr_for_avg = [p for p in local_psnr if not np.isinf(p)]
+            if psnr_for_avg:
+                psnrs.append(float(np.mean(psnr_for_avg)))
+            else:
+                psnrs.append(float('nan'))
             ssims.append(float(sum(local_ssim) / len(local_ssim)))
             with torch.no_grad():
                 gen_tensor = torch.stack([trans(Image.fromarray(x)) for x in gen_frames]).to(device)
@@ -438,7 +490,7 @@ def compute_video_pair_metrics(split: str, task_key: str, rows, device: str):
         except Exception as exc:
             print('VIDEO_PAIR_FAIL', split, task_key, sample_id, exc, flush=True)
     return {
-        'psnr': round(float(sum(psnrs) / len(psnrs)), 6) if psnrs else None,
+        'psnr': round(float(np.nanmean(psnrs)), 6) if psnrs and np.any(np.isfinite(psnrs)) else None,
         'ssim': round(float(sum(ssims) / len(ssims)), 6) if ssims else None,
         'dino': round(float(sum(dinos) / len(dinos)), 6) if dinos else None,
         'pair_count': len(psnrs),
@@ -450,26 +502,23 @@ def main():
     device = args.device
     FVD_CACHE.mkdir(parents=True, exist_ok=True)
     RENDER_CACHE.mkdir(parents=True, exist_ok=True)
-    gt_stats = compute_gt_stats(device=device, force=args.force_gt, max_items=args.max_gt_videos)
     if args.gt_stats_only:
-        return
+        raise SystemExit('--gt-stats-only is no longer supported without a target count')
     bench = load_bench()
     report = {
         'protocol': {
             'results_root': '/root/SVG Generation/results/official_rerun',
             'fvd_gt_source': 'MMLottie-2M',
-            'fvd_sample_fraction': SAMPLE_FRAC,
             'fvd_sample_seed': SAMPLE_SEED,
             'num_frames': NUM_FRAMES,
             'frame_size': FRAME_SIZE,
             'device': device,
         },
         'notes': [
-            'FVD uses the user-specified protocol: compare generated video sets against a 15% random sample of MMLottie-2M with seed=42.',
+            'FVD uses the user-specified protocol: compare each generated video set against a seed=42 random sample from MMLottie-2M with matched sample count.',
             'CLIP is computed only for Text-to-Lottie and Text-Image-to-Lottie.',
             'PSNR, SSIM, and DINO are computed only for Video-to-Lottie against the benchmark reference video.',
         ],
-        'gt_stats': gt_stats.get('meta', {}),
         'metrics': {},
     }
     for split in ['real', 'synthetic']:
@@ -480,9 +529,10 @@ def main():
             task_rows = [row for row in split_rows if row['task_type'] == label]
             result_dir = RESULTS[split][task_key]
             generated = compute_generated_fvd_stats(split, task_key, task_rows, device=device, force=args.force_generated)
+            gt_stats = compute_gt_stats(device=device, target_count=generated['count'], force=args.force_gt) if generated['count'] > 0 else None
             entry = {
                 'generated_count': generated['count'],
-                'fvd': round(frechet_distance(gt_stats['mean'], gt_stats['cov'], generated['mean'], generated['cov']), 6) if generated['count'] > 1 and gt_stats['count'] > 1 else None,
+                'fvd': round(frechet_distance(gt_stats['mean'], gt_stats['cov'], generated['mean'], generated['cov']), 6) if gt_stats and generated['count'] > 1 and gt_stats['count'] > 1 else None,
                 'fvd_feature_count': generated['count'],
             }
             if label in TEXT_TASKS:

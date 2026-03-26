@@ -2,7 +2,8 @@
   "device": "cuda",
   "notes": [
     "real: Text-to-Lottie and Text-Image-to-Lottie FVD unavailable from public MMLottieBench release because reference videos are not exposed in those task rows.",
-    "synthetic: Text-to-Lottie and Text-Image-to-Lottie FVD unavailable from public MMLottieBench release because reference videos are not exposed in those task rows."
+    "synthetic: Text-to-Lottie and Text-Image-to-Lottie FVD unavailable from public MMLottieBench release because reference videos are not exposed in those task rows.",
+    "PSNR/SSIM/DINO refreshed with corrected compute_video_pair_metrics implementation; other metrics preserved."
   ],
   "metrics": {
     "real": {
@@ -41,10 +42,10 @@
         "approx_time_seconds": 61.1554,
         "clip": null,
         "fvd": 612.809944,
-        "psnr": 0.964582,
-        "ssim": 0.050885,
-        "dino": 0.612622,
-        "pair_count": 150
+        "psnr": 12.696524,
+        "ssim": 0.788105,
+        "dino": 0.770922,
+        "pair_count": 149
       }
     },
     "synthetic": {
@@ -83,10 +84,10 @@
         "approx_time_seconds": 118.8951,
         "clip": null,
         "fvd": 1143.449805,
-        "psnr": 1.06111,
-        "ssim": 0.022848,
-        "dino": 0.462216,
-        "pair_count": 148
+        "psnr": 12.261244,
+        "ssim": 0.833905,
+        "dino": 0.563451,
+        "pair_count": 146
       }
     }
   }

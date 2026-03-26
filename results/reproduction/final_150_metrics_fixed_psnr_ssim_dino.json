@@ -1,0 +1,121 @@
+{
+  "notes": [
+    "Time/Tokens/Success/FVD/CLIP keep the original pipeline outputs.",
+    "Obj/Motion use the user-specified ai.hhhl.cc + claude-sonnet-3-5-latest judge outputs.",
+    "PSNR/SSIM/DINO are replaced with the corrected compute_video_pair_metrics results."
+  ],
+  "metrics": {
+    "real": {
+      "Text-to-Lottie": {
+        "success_count": 150,
+        "total_count": 150,
+        "success_rate": 100.0,
+        "avg_qwen_tokens": 20460.8867,
+        "avg_time_seconds": 59.3581,
+        "fvd": 539.195876,
+        "clip": 0.265415,
+        "object_alignment": 3.36,
+        "motion_alignment": 3.166667,
+        "psnr": null,
+        "ssim": null,
+        "dino": null,
+        "pair_count": null,
+        "judge_count": 150,
+        "fvd_gt_count": 150,
+        "fvd_generated_count": 148
+      },
+      "Text-Image-to-Lottie": {
+        "success_count": 148,
+        "total_count": 150,
+        "success_rate": 98.6667,
+        "avg_qwen_tokens": 22112.2838,
+        "avg_time_seconds": 68.869,
+        "fvd": 532.756873,
+        "clip": 0.270344,
+        "object_alignment": 4.027211,
+        "motion_alignment": 3.931973,
+        "psnr": null,
+        "ssim": null,
+        "dino": null,
+        "pair_count": null,
+        "judge_count": 147,
+        "fvd_gt_count": 148,
+        "fvd_generated_count": 147
+      },
+      "Video-to-Lottie": {
+        "success_count": 150,
+        "total_count": 150,
+        "success_rate": 100.0,
+        "avg_qwen_tokens": 20763.8467,
+        "avg_time_seconds": 61.1554,
+        "fvd": 539.975505,
+        "clip": null,
+        "object_alignment": null,
+        "motion_alignment": null,
+        "psnr": 12.696524,
+        "ssim": 0.788105,
+        "dino": 0.770922,
+        "pair_count": 149,
+        "judge_count": null,
+        "fvd_gt_count": 150,
+        "fvd_generated_count": 149
+      }
+    },
+    "synthetic": {
+      "Text-to-Lottie": {
+        "success_count": 150,
+        "total_count": 150,
+        "success_rate": 100.0,
+        "avg_qwen_tokens": 12882.0467,
+        "avg_time_seconds": 38.604,
+        "fvd": 517.469889,
+        "clip": 0.274155,
+        "object_alignment": 4.46,
+        "motion_alignment": 3.206667,
+        "psnr": null,
+        "ssim": null,
+        "dino": null,
+        "pair_count": null,
+        "judge_count": 150,
+        "fvd_gt_count": 150,
+        "fvd_generated_count": 150
+      },
+      "Text-Image-to-Lottie": {
+        "success_count": 150,
+        "total_count": 150,
+        "success_rate": 100.0,
+        "avg_qwen_tokens": 17571.42,
+        "avg_time_seconds": 55.9932,
+        "fvd": 564.773963,
+        "clip": 0.277476,
+        "object_alignment": 6.44,
+        "motion_alignment": 3.773333,
+        "psnr": null,
+        "ssim": null,
+        "dino": null,
+        "pair_count": null,
+        "judge_count": 150,
+        "fvd_gt_count": 150,
+        "fvd_generated_count": 150
+      },
+      "Video-to-Lottie": {
+        "success_count": 149,
+        "total_count": 150,
+        "success_rate": 99.3333,
+        "avg_qwen_tokens": 38741.5235,
+        "avg_time_seconds": 118.8951,
+        "fvd": 567.358614,
+        "clip": null,
+        "object_alignment": null,
+        "motion_alignment": null,
+        "psnr": 12.261244,
+        "ssim": 0.833905,
+        "dino": 0.563451,
+        "pair_count": 146,
+        "judge_count": null,
+        "fvd_gt_count": 149,
+        "fvd_generated_count": 146
+      }
+    }
+  }
+}

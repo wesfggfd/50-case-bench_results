@@ -7,12 +7,11 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-import cv2
 import numpy as np
 import requests
 from PIL import Image
 
-from lottie.exporters.video import export_video
+from lottie.exporters.cairo import export_png
 from lottie.parsers.tgs import parse_tgs
 
 
@@ -21,19 +20,13 @@ BUNDLE_DIR = BASE_DIR / "official_bundle" / "judge_official_bundle"
 MANIFEST_PATH = BUNDLE_DIR / "judge_manifest_official.json"
 RESULTS_ROOT = BUNDLE_DIR / "official_rerun_text"
 REMOTE_CACHE_ROOT = BUNDLE_DIR / "judge_cache_official_claude46"
-RENDER_ROOT = BASE_DIR / "render_cache_official_local"
 LOCAL_CACHE_ROOT = BASE_DIR / "judge_cache_official_local_claude46"
 REPORT_PATH = BASE_DIR / "judge_metrics_report_official_local_claude46.json"
 LOG_PATH = BASE_DIR / "judge_metrics_official_local.log"
 
-API_URL = "https://aiapi.cxyquan.com/v1/messages"
-API_KEY = "sk-SmgUodnjVrKR6OGrZ51GcZL8G7QoFuoUMiFS5wOGL7iKGfM5"
-MODEL = "claude-sonnet-4-6"
-
-HEADERS = {
-    "Authorization": f"Bearer {API_KEY}",
-    "Content-Type": "application/json",
-}
+API_URL = os.environ.get("JUDGE_API_URL", "")
+API_KEY = os.environ.get("JUDGE_API_KEY", "")
+MODEL = os.environ.get("JUDGE_MODEL", "claude-sonnet-3-5-latest")
 
 RESULT_DIRS = {
     ("real", "text2lottie"): RESULTS_ROOT / "real_text2lottie" / "mmlottie_bench_real",
@@ -78,40 +71,56 @@ Return JSON only.
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--max-items", type=int, default=None)
+    parser.add_argument("--manifest-path", type=str, default=str(MANIFEST_PATH))
+    parser.add_argument("--report-path", type=str, default=str(REPORT_PATH))
+    parser.add_argument("--log-path", type=str, default=str(LOG_PATH))
+    parser.add_argument("--local-cache-root", type=str, default=str(LOCAL_CACHE_ROOT))
+    parser.add_argument("--remote-cache-root", type=str, default=str(REMOTE_CACHE_ROOT))
+    parser.add_argument("--api-url", type=str, default=API_URL)
+    parser.add_argument("--api-key", type=str, default=API_KEY)
+    parser.add_argument("--model", type=str, default=MODEL)
     return parser.parse_args()
 
 
-def log(message: str) -> None:
+def log(message: str, log_path: Path) -> None:
     line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}"
     print(line, flush=True)
-    with LOG_PATH.open("a", encoding="utf-8") as f:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as f:
         f.write(line + "\n")
 
 
-def load_manifest():
-    with MANIFEST_PATH.open("r", encoding="utf-8") as f:
+def load_manifest(path: Path):
+    with path.open("r", encoding="utf-8") as f:
         return json.load(f)
 
 
-def sample_frames(video_path: Path, num_frames: int = 8):
-    cap = cv2.VideoCapture(str(video_path))
-    frames = []
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
-        frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-    cap.release()
-    if not frames:
-        raise ValueError(f"No frames decoded from {video_path}")
+def composite_on_background(img: Image.Image, background=(255, 255, 255)) -> Image.Image:
+    if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+        rgba = img.convert("RGBA")
+        base = Image.new("RGB", rgba.size, background)
+        base.paste(rgba, mask=rgba.getchannel("A"))
+        return base
+    return img.convert("RGB")
 
-    idx = sorted(set(int(x) for x in np.linspace(0, len(frames) - 1, min(num_frames, len(frames)))))
+
+def render_sampled_frames_b64(item, num_frames: int = 8, target_size=(224, 224), background=(255, 255, 255)):
+    result_dir = RESULT_DIRS[(item["split"], item["task_key"])]
+    json_path = result_dir / f'{item["id"]}.json'
+    if not json_path.exists():
+        raise FileNotFoundError(f"Missing generated JSON: {json_path}")
+    anim = parse_tgs(str(json_path))
+    frame_ids = np.linspace(int(anim.in_point), int(anim.out_point), num_frames).astype(int)
     encoded = []
-    for i in idx:
-        img = Image.fromarray(frames[i]).convert("RGB").resize((224, 224))
+    for frame_id in frame_ids:
         buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        encoded.append(base64.b64encode(buf.getvalue()).decode())
+        export_png(anim, buf, frame=int(frame_id))
+        buf.seek(0)
+        img = composite_on_background(Image.open(buf), background=background).resize(target_size)
+        out = io.BytesIO()
+        img.save(out, format="PNG")
+        out.seek(0)
+        encoded.append(base64.b64encode(out.read()).decode())
     return encoded
 
 
@@ -125,9 +134,23 @@ def parse_anthropic_json(response_json):
     return json.loads(text[start : end + 1])
 
 
-def call_claude(prompt_prefix: str, caption: str, frame_b64_list, max_retries: int = 8):
+def normalize_api_url(url: str) -> str:
+    url = url.rstrip("/")
+    if url.endswith("/v1/messages"):
+        return url
+    return url + "/v1/messages"
+
+
+def make_headers(api_key: str):
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+
+def call_claude(prompt_prefix: str, caption: str, frame_b64_list, api_url: str, api_key: str, model: str, log_path: Path, max_retries: int = 8):
     payload = {
-        "model": MODEL,
+        "model": model,
         "max_tokens": 512,
         "messages": [
             {
@@ -153,23 +176,25 @@ def call_claude(prompt_prefix: str, caption: str, frame_b64_list, max_retries: i
     last_error = None
     for attempt in range(1, max_retries + 1):
         try:
-            resp = requests.post(API_URL, headers=HEADERS, json=payload, timeout=120)
+            resp = requests.post(normalize_api_url(api_url), headers=make_headers(api_key), json=payload, timeout=120)
             resp.raise_for_status()
             return parse_anthropic_json(resp.json())
         except Exception as exc:
             last_error = exc
             sleep_s = min(60, 2 ** attempt)
-            log(f"retry {attempt}/{max_retries} after error: {exc}")
+            log(f"retry {attempt}/{max_retries} after error: {exc}", log_path)
             time.sleep(sleep_s)
     raise RuntimeError(f"Claude request failed after {max_retries} attempts: {last_error}")
 
 
-def remote_cache_path(item):
-    return REMOTE_CACHE_ROOT / item["split"] / item["task_key"] / f'{item["id"]}.json'
+def remote_cache_path(item, remote_cache_root: Path | None):
+    if remote_cache_root is None:
+        return None
+    return remote_cache_root / item["split"] / item["task_key"] / f'{item["id"]}.json'
 
 
-def local_cache_path(item):
-    path = LOCAL_CACHE_ROOT / item["split"] / item["task_key"] / f'{item["id"]}.json'
+def local_cache_path(item, local_cache_root: Path):
+    path = local_cache_root / item["split"] / item["task_key"] / f'{item["id"]}.json'
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -182,28 +207,14 @@ def valid_record(rec):
     )
 
 
-def ensure_render(item):
-    render_path = RENDER_ROOT / item["split"] / item["task_key"] / f'{item["id"]}.mp4'
-    render_path.parent.mkdir(parents=True, exist_ok=True)
-    if render_path.exists() and render_path.stat().st_size > 0:
-        return render_path
-    result_dir = RESULT_DIRS[(item["split"], item["task_key"])]
-    json_path = result_dir / f'{item["id"]}.json'
-    if not json_path.exists():
-        raise FileNotFoundError(f"Missing generated JSON: {json_path}")
-    anim = parse_tgs(str(json_path))
-    export_video(anim, str(render_path), format="mp4")
-    return render_path
-
-
-def write_report(records):
+def write_report(records, report_path: Path, api_url: str, model: str):
     aggregate = {
-        "model": MODEL,
-        "api_url": API_URL,
+        "model": model,
+        "api_url": normalize_api_url(api_url),
         "notes": [
-            "Object/Motion were evaluated locally with 8 uniformly sampled rendered frames on official_rerun outputs.",
-            "Official manifest contains only successful text-task outputs from official_rerun.",
-            "Existing valid remote official cache entries were reused before local re-evaluation.",
+            "Object/Motion were evaluated locally with 8 uniformly sampled rendered PNG frames on official_rerun outputs.",
+            "Manifest is user-selected and may contain fewer than 100 items for a subset-task when the generated JSON is missing locally.",
+            "Rendered frames are composited onto a white background before judge scoring.",
         ],
         "metrics": {},
     }
@@ -226,21 +237,30 @@ def write_report(records):
                 "evaluated_count_motion": len(mot),
             }
 
-    with REPORT_PATH.open("w", encoding="utf-8") as f:
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    with report_path.open("w", encoding="utf-8") as f:
         json.dump(aggregate, f, ensure_ascii=False, indent=2)
 
 
 def main():
     args = parse_args()
-    LOCAL_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-    RENDER_ROOT.mkdir(parents=True, exist_ok=True)
-    items = load_manifest()
+    manifest_path = Path(args.manifest_path)
+    report_path = Path(args.report_path)
+    log_path = Path(args.log_path)
+    local_cache_root = Path(args.local_cache_root)
+    remote_cache_root = Path(args.remote_cache_root) if args.remote_cache_root else None
+
+    if not args.api_url or not args.api_key:
+        raise ValueError("api_url/api_key are required, pass via args or JUDGE_API_URL/JUDGE_API_KEY")
+
+    local_cache_root.mkdir(parents=True, exist_ok=True)
+    items = load_manifest(manifest_path)
     if args.max_items is not None:
         items = items[: args.max_items]
     final_records = []
 
     for idx, item in enumerate(items, 1):
-        out_path = local_cache_path(item)
+        out_path = local_cache_path(item, local_cache_root)
 
         if out_path.exists():
             with out_path.open("r", encoding="utf-8") as f:
@@ -249,8 +269,8 @@ def main():
                 final_records.append(rec)
                 continue
 
-        rpath = remote_cache_path(item)
-        if rpath.exists():
+        rpath = remote_cache_path(item, remote_cache_root)
+        if rpath is not None and rpath.exists():
             with rpath.open("r", encoding="utf-8") as f:
                 rec = json.load(f)
             if valid_record(rec):
@@ -261,10 +281,9 @@ def main():
                 continue
 
         try:
-            video_path = ensure_render(item)
-            frames = sample_frames(video_path, num_frames=8)
-            obj = call_claude(OBJ_PROMPT, item["text"], frames)
-            mot = call_claude(MOTION_PROMPT, item["text"], frames)
+            frames = render_sampled_frames_b64(item, num_frames=8)
+            obj = call_claude(OBJ_PROMPT, item["text"], frames, args.api_url, args.api_key, args.model, log_path)
+            mot = call_claude(MOTION_PROMPT, item["text"], frames, args.api_url, args.api_key, args.model, log_path)
             rec = {
                 "id": item["id"],
                 "split": item["split"],
@@ -288,11 +307,11 @@ def main():
             out_path.write_text(json.dumps(rec, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
         if idx % 10 == 0:
-            write_report(final_records)
-            log(f"processed {idx}/{len(items)}")
+            write_report(final_records, report_path, args.api_url, args.model)
+            log(f"processed {idx}/{len(items)}", log_path)
 
-    write_report(final_records)
-    log("DONE")
+    write_report(final_records, report_path, args.api_url, args.model)
+    log("DONE", log_path)
 
 
 if __name__ == "__main__":

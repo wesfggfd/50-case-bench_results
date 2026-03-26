@@ -1,0 +1,42 @@
+{
+  "model": "claude-sonnet-3-5-latest",
+  "api_url": "https://ai.hhhl.cc",
+  "notes": [
+    "Object/Motion were evaluated locally with 8 uniformly sampled rendered frames on downloaded official_rerun text-task outputs.",
+    "Requests target the user-provided third-party API, keep only public-standard text tasks, and score object/motion in a single request per sample."
+  ],
+  "metrics": {
+    "real": {
+      "Text-to-Lottie": {
+        "count": 150,
+        "object_alignment": 3.36,
+        "motion_alignment": 3.166667,
+        "evaluated_count_obj": 150,
+        "evaluated_count_motion": 150
+      },
+      "Text-Image-to-Lottie": {
+        "count": 147,
+        "object_alignment": 4.027211,
+        "motion_alignment": 3.931973,
+        "evaluated_count_obj": 147,
+        "evaluated_count_motion": 147
+      }
+    },
+    "synthetic": {
+      "Text-to-Lottie": {
+        "count": 150,
+        "object_alignment": 4.46,
+        "motion_alignment": 3.206667,
+        "evaluated_count_obj": 150,
+        "evaluated_count_motion": 150
+      },
+      "Text-Image-to-Lottie": {
+        "count": 150,
+        "object_alignment": 6.44,
+        "motion_alignment": 3.773333,
+        "evaluated_count_obj": 150,
+        "evaluated_count_motion": 150
+      }
+    }
+  }
+}

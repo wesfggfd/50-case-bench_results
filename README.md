@@ -5,9 +5,9 @@ This repository collects the OmniLottie benchmark artifacts prepared during the 
 ## Contents
 
 - `results/first50/`: interim aggregation on the first 50 benchmark cases for each `split-task`, using existing outputs without re-running generation
-- `results/reproduction/`: reproduction reports exported from the remote benchmark environment
+- `results/reproduction/`: final reproduction reports exported from the remote benchmark environment
 - `scripts/remote/`: inference and evaluation scripts used on the remote machine
-- `scripts/local/`: local judge rerun script used for `Obj / Motion`
+- `scripts/local/`: local judge and sync scripts used for `Obj / Motion`
 
 ## Included Reports
 
@@ -15,13 +15,16 @@ This repository collects the OmniLottie benchmark artifacts prepared during the 
 - `results/first50/first50_interim_metrics.json`: machine-readable first-50 metrics
 - `results/first50/first50_vs_table1.csv`: flattened comparison table against paper Table 1
 - `results/first50/first50_vs_table1_heatmap.png`: visual comparison against paper Table 1
-- `results/reproduction/table1_reproduction_report.md`: full reproduction report exported from the remote environment
+- `results/reproduction/table1_reproduction_report.md`: Table 1-style summary and paper comparison for the final selected benchmark results
 - `results/reproduction/core_metrics_report.json`: core metric report exported from the remote environment
-- `results/reproduction/judge_metrics_report_official_local_claude46.json`: locally computed judge report for `Obj / Motion`
+- `results/reproduction/final_150_metrics_fixed_psnr_ssim_dino.json`: final merged metrics with corrected `FVD` and `PSNR/SSIM/DINO`
+- `results/reproduction/final_150_metrics_fixed_psnr_ssim_dino.md`: human-readable final 150 summary
+- `results/reproduction/judge_metrics_report_public_local_claude35_aihhhl.json`: locally computed `Obj / Motion` report using the user-specified `ai.hhhl.cc` API
 
 ## Notes
 
 - The first-50 aggregation uses the benchmark's first 50 samples in dataset order for each `subset-task`.
 - Success rate keeps failed generations in the denominator.
 - Metrics are aggregated from existing outputs only.
-- One `Video-to-Lottie` sample in the real split rendered successfully but failed video decoding during pairwise metric aggregation, so its pairwise counts are `49` instead of `50`.
+- The final `results/reproduction/` reports summarize the selected 150 benchmark results for each `subset-task`.
+- `Obj / Motion` in the final reproduction report come from `https://ai.hhhl.cc` with `claude-sonnet-3-5-latest`, following the user-specified evaluation setup.
