@@ -29,10 +29,10 @@ API_KEY = os.environ.get("JUDGE_API_KEY", "")
 MODEL = os.environ.get("JUDGE_MODEL", "claude-sonnet-3-5-latest")
 
 RESULT_DIRS = {
-    ("real", "text2lottie"): RESULTS_ROOT / "real_text2lottie" / "mmlottie_bench_real",
-    ("real", "text_image2lottie"): RESULTS_ROOT / "real_text_image2lottie" / "mmlottie_bench_real",
-    ("synthetic", "text2lottie"): RESULTS_ROOT / "synthetic_text2lottie" / "mmlottie_bench_synthetic",
-    ("synthetic", "text_image2lottie"): RESULTS_ROOT / "synthetic_text_image2lottie" / "mmlottie_bench_synthetic",
+    ("real", "text2lottie"): RESULTS_ROOT / "mmlottie_bench_real_text2lottie",
+    ("real", "text_image2lottie"): RESULTS_ROOT / "mmlottie_bench_real_text_image2lottie",
+    ("synthetic", "text2lottie"): RESULTS_ROOT / "mmlottie_bench_synthetic_text2lottie",
+    ("synthetic", "text_image2lottie"): RESULTS_ROOT / "mmlottie_bench_synthetic_text_image2lottie",
 }
 
 OBJ_PROMPT = """You are a professional animation evaluator tasked with assessing AI-generated Lottie animations. Your response must strictly follow this JSON format:

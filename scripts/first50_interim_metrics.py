@@ -16,8 +16,8 @@ JUDGE_CACHE_DIR = Path('/root/SVG Generation/OmniLottie/reproduction_results/jud
 JUDGE_REPORT = Path('/root/SVG Generation/OmniLottie/reproduction_results/judge_metrics_report_official_local_claude46.json')
 OUT_JSON = Path('/root/SVG Generation/OmniLottie/reproduction_results/first50_interim_metrics.json')
 OUT_MD = Path('/root/SVG Generation/OmniLottie/reproduction_results/first50_interim_report.md')
-TIME_CSV = Path('/root/SVG Generation/results/time_runs/timing.csv')
-TOKENIZER_PATH = '/root/SVG Generation/downloads/base/Qwen2.5-VL-3B-Instruct'
+TIME_CSV = Path(os.environ.get('MMLOTTIE_TIME_CSV', '/root/SVG Generation/results/time_runs/timing.csv'))
+TOKENIZER_PATH = os.environ.get('MMLOTTIE_TOKENIZER_PATH', 'Qwen/Qwen3.5-9B')
 TASK_KEY_BY_LABEL = {
     'Text-to-Lottie': 'text2lottie',
     'Text-Image-to-Lottie': 'text_image2lottie',

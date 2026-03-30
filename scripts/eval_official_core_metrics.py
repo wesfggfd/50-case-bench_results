@@ -30,20 +30,16 @@ from lottie.exporters.video import export_video
 from lottie.parsers.tgs import parse_tgs
 
 BENCH_FILES = {
-    'real': '/root/SVG Generation/downloads/bench/MMLottieBench/data/real-00000-of-00001.parquet',
-    'synthetic': '/root/SVG Generation/downloads/bench/MMLottieBench/data/synthetic-00000-of-00001.parquet',
+    'real': os.environ.get('MMLOTTIE_BENCH_REAL', '/root/SVG Generation/downloads/bench/MMLottieBench/data/real-00000-of-00001.parquet'),
+    'synthetic': os.environ.get('MMLOTTIE_BENCH_SYNTHETIC', '/root/SVG Generation/downloads/bench/MMLottieBench/data/synthetic-00000-of-00001.parquet'),
 }
+RESULTS_ROOT = Path(os.environ.get('MMLOTTIE_RESULTS_ROOT', '/root/SVG Generation/results/official_rerun'))
 RESULTS = {
-    'real': {
-        'text2lottie': Path('/root/SVG Generation/results/official_rerun/real_text2lottie/mmlottie_bench_real'),
-        'text_image2lottie': Path('/root/SVG Generation/results/official_rerun/real_text_image2lottie/mmlottie_bench_real'),
-        'video2lottie': Path('/root/SVG Generation/results/official_rerun/real_video2lottie/mmlottie_bench_real'),
-    },
-    'synthetic': {
-        'text2lottie': Path('/root/SVG Generation/results/official_rerun/synthetic_text2lottie/mmlottie_bench_synthetic'),
-        'text_image2lottie': Path('/root/SVG Generation/results/official_rerun/synthetic_text_image2lottie/mmlottie_bench_synthetic'),
-        'video2lottie': Path('/root/SVG Generation/results/official_rerun/synthetic_video2lottie/mmlottie_bench_synthetic'),
-    },
+    split: {
+        task_key: RESULTS_ROOT / f'mmlottie_bench_{split}_{task_key}'
+        for task_key in ['text2lottie', 'text_image2lottie', 'video2lottie']
+    }
+    for split in ['real', 'synthetic']
 }
 TASK_LABELS = {
     'text2lottie': 'Text-to-Lottie',
@@ -510,7 +506,7 @@ def main():
     bench = load_bench()
     report = {
         'protocol': {
-            'results_root': '/root/SVG Generation/results/official_rerun',
+            'results_root': str(RESULTS_ROOT),
             'fvd_gt_source': 'MMLottie-2M',
             'fvd_sample_seed': SAMPLE_SEED,
             'num_frames': BENCH_VIDEO_FRAME_COUNT,

@@ -13,15 +13,15 @@ TASK_LABELS = {
     'video2lottie': 'Video-to-Lottie',
 }
 TASK_ORDER = ['text2lottie', 'text_image2lottie', 'video2lottie']
-RESULTS_ROOT = Path('/root/SVG Generation/results/official_rerun')
-TIME_ROOT = Path('/root/SVG Generation/results/time_runs')
-TIME_CSV = TIME_ROOT / 'timing.csv'
-TOKENIZER_PATH = '/root/SVG Generation/downloads/base/Qwen2.5-VL-3B-Instruct'
+RESULTS_ROOT = Path(os.environ.get('MMLOTTIE_RESULTS_ROOT', '/root/SVG Generation/results/official_rerun'))
+TIME_ROOT = Path(os.environ.get('MMLOTTIE_TIME_ROOT', '/root/SVG Generation/results/time_runs'))
+TIME_CSV = Path(os.environ.get('MMLOTTIE_TIME_CSV', str(TIME_ROOT / 'timing.csv')))
+TOKENIZER_PATH = os.environ.get('MMLOTTIE_TOKENIZER_PATH', 'Qwen/Qwen3.5-9B')
 OUT_JSON = Path('/root/SVG Generation/OmniLottie/reproduction_results/official_success_time_tokens.json')
 
 
 def json_dir(split, task_key):
-    return RESULTS_ROOT / f'{split}_{task_key}' / f'mmlottie_bench_{split}'
+    return RESULTS_ROOT / f'mmlottie_bench_{split}_{task_key}'
 
 
 def avg_tokens(tokenizer, paths):

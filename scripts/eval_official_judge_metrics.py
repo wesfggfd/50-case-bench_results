@@ -23,18 +23,16 @@ HEADERS = {
     'Content-Type': 'application/json',
 }
 BENCH_FILES = {
-    'real': '/root/SVG Generation/downloads/bench/MMLottieBench/data/real-00000-of-00001.parquet',
-    'synthetic': '/root/SVG Generation/downloads/bench/MMLottieBench/data/synthetic-00000-of-00001.parquet',
+    'real': os.environ.get('MMLOTTIE_BENCH_REAL', '/root/SVG Generation/downloads/bench/MMLottieBench/data/real-00000-of-00001.parquet'),
+    'synthetic': os.environ.get('MMLOTTIE_BENCH_SYNTHETIC', '/root/SVG Generation/downloads/bench/MMLottieBench/data/synthetic-00000-of-00001.parquet'),
 }
+RESULTS_ROOT = Path(os.environ.get('MMLOTTIE_RESULTS_ROOT', '/root/SVG Generation/results/official_rerun'))
 RESULTS = {
-    'real': {
-        'text2lottie': Path('/root/SVG Generation/results/official_rerun/real_text2lottie/mmlottie_bench_real'),
-        'text_image2lottie': Path('/root/SVG Generation/results/official_rerun/real_text_image2lottie/mmlottie_bench_real'),
-    },
-    'synthetic': {
-        'text2lottie': Path('/root/SVG Generation/results/official_rerun/synthetic_text2lottie/mmlottie_bench_synthetic'),
-        'text_image2lottie': Path('/root/SVG Generation/results/official_rerun/synthetic_text_image2lottie/mmlottie_bench_synthetic'),
-    },
+    split: {
+        task_key: RESULTS_ROOT / f'mmlottie_bench_{split}_{task_key}'
+        for task_key in ['text2lottie', 'text_image2lottie']
+    }
+    for split in ['real', 'synthetic']
 }
 TASK_ORDER = [
     ('text2lottie', 'Text-to-Lottie'),
@@ -189,7 +187,7 @@ def write_report(records):
         'model': MODEL,
         'api_url': API_URL,
         'notes': [
-            'Object/Motion were evaluated with 8 uniformly sampled rendered frames on official_rerun outputs.',
+            f'Object/Motion were evaluated with 8 uniformly sampled rendered frames on outputs under {RESULTS_ROOT}.',
             'Judge requests use the Anthropic-style messages API endpoint provided by the user.',
         ],
         'metrics': {},
