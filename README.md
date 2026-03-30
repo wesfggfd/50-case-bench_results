@@ -30,8 +30,6 @@ So unlike the training-code repo, this benchmark repo is expected to keep the ev
 │   ├── reproduction/
 │   └── single_sample_preview/
 ├── scripts/
-│   ├── remote/
-│   └── local/
 ├── LICENSE
 └── README.md
 ```
@@ -43,18 +41,14 @@ Final benchmark reproduction outputs, including:
 - `final_150_metrics_fixed_psnr_ssim_dino.md`
 - `judge_metrics_report_public_local_claude35_aihhhl.json`
 
-### `scripts/remote/`
-Scripts used on the remote benchmark machine for:
+### `scripts/`
+All benchmark inference and evaluation logic is now kept directly under `scripts/`.
+This includes:
 - inference
 - official metric evaluation
-- metric recomputation / correction
-- merging revised video metrics back into final reports
-
-### `scripts/local/`
-Local-side scripts mainly used for:
 - judge-based evaluation
-- syncing remote benchmark outputs
-- recomputing local report pieces
+- metric recomputation / correction
+- sync / merge helper scripts
 
 ---
 
@@ -113,8 +107,8 @@ The current README is written to make that explicit: the scripts and the benchma
 ## Usage
 
 Typical workflow:
-1. run remote inference / metric scripts from `scripts/remote/`
-2. sync or post-process results locally with `scripts/local/`
+1. run remote inference / metric scripts from `scripts/`
+2. sync or post-process results locally with `scripts/`
 3. keep the resulting reports in `results/reproduction/`
 
 This makes the repository a combined:
