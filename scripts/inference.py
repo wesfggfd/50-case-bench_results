@@ -20,7 +20,7 @@ from typing import List, Dict, Set, Optional, Tuple
 from safetensors.torch import load_file
 from huggingface_hub import snapshot_download
 from datasets import load_dataset, load_from_disk
-from transformers import AutoConfig, AutoTokenizer, AutoProcessor
+from transformers import AutoConfig, AutoTokenizer, AutoProcessor, LogitsProcessor
 from peft import LoraConfig, get_peft_model
 from qwen_vl_utils import process_vision_info
 
@@ -49,6 +49,7 @@ from lottie.exporters.video import export_video
 from lottie.parsers.tgs import parse_tgs
 
 from PIL import Image as PILImage
+from lottie.objects.lottie_rule_tokenizer import LottieVocabLayout
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 torch.backends.cudnn.benchmark = False
@@ -72,17 +73,87 @@ BENCH_RENDER_HEIGHT = 336
 BENCH_RENDER_FRAME_COUNT = 16
 BENCH_DATA_ROOT = Path(os.environ.get("MMLOTTIE_BENCH_DATA_ROOT", "/opt/liblibai-models/user-workspace2/dataset/MMLottieBench/data"))
 
-# Lottie token IDs — Qwen3.5-9B
-# config.text_config.vocab_size=248320, ORIGINAL_BASE=151643 → shift=96677
-# ORIGINAL offsets: CMD=151936, NUM=173186, BOS=192398, EOS=192399, PAD=151643
-_QWEN35_BASE_VOCAB_SIZE = 248320   # Qwen3.5-9B text_config.vocab_size
-_ORIGINAL_BASE_VOCAB_SIZE = 151643
-_LOTTIE_SHIFT = _QWEN35_BASE_VOCAB_SIZE - _ORIGINAL_BASE_VOCAB_SIZE  # 96677
-LOTTIE_BOS     = 192398 + _LOTTIE_SHIFT  # 289075
-LOTTIE_EOS     = 192399 + _LOTTIE_SHIFT  # 289076
-PAD_TOKEN      = 151643 + _LOTTIE_SHIFT  # 248320
-COMMAND_OFFSET = 151936 + _LOTTIE_SHIFT  # 248613
-NUM_COMMANDS   = 282  # unchanged
+# Lottie token IDs (configured dynamically from the current backbone)
+LOTTIE_BOS = 192398
+LOTTIE_EOS = 192399
+PAD_TOKEN = 151643
+COMMAND_OFFSET = 151936
+NUM_COMMANDS = 282
+TOKENIZER_LENGTH = 151643
+LOTTIE_TOKEN_START = 151643
+LOTTIE_TOKEN_END = 192399
+
+
+class LottieBoundaryLogitsProcessor(LogitsProcessor):
+    def __init__(
+        self,
+        bos_token_id: int,
+        eos_token_id: int,
+        pad_token_id: int,
+        prompt_length: int,
+        tokenizer_length: int,
+        lottie_token_start: int,
+        lottie_token_end: int,
+    ):
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
+        self.pad_token_id = pad_token_id
+        self.prompt_length = prompt_length
+        self.tokenizer_length = tokenizer_length
+        self.lottie_token_start = lottie_token_start
+        self.lottie_token_end = lottie_token_end
+        self._allowed_mask_cache: Optional[torch.Tensor] = None
+        self._allowed_mask_vocab_size: Optional[int] = None
+
+    def _get_allowed_mask(self, vocab_size: int, device: torch.device) -> torch.Tensor:
+        if self._allowed_mask_cache is not None and self._allowed_mask_vocab_size == vocab_size:
+            return self._allowed_mask_cache.to(device=device)
+
+        allowed = torch.zeros(vocab_size, dtype=torch.bool)
+        allowed[: min(self.tokenizer_length, vocab_size)] = True
+        lottie_start = max(0, min(self.lottie_token_start, vocab_size))
+        lottie_end = max(lottie_start, min(self.lottie_token_end + 1, vocab_size))
+        allowed[lottie_start:lottie_end] = True
+        if 0 <= self.eos_token_id < vocab_size:
+            allowed[self.eos_token_id] = True
+        self._allowed_mask_cache = allowed
+        self._allowed_mask_vocab_size = vocab_size
+        return allowed.to(device=device)
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        generation_step = input_ids.shape[1] - self.prompt_length
+        vocab_size = scores.shape[-1]
+        allowed_mask = self._get_allowed_mask(vocab_size=vocab_size, device=scores.device)
+        scores = scores.masked_fill(~allowed_mask.unsqueeze(0), float('-inf'))
+
+        if 0 <= self.pad_token_id < vocab_size:
+            scores[:, self.pad_token_id] = float('-inf')
+        if generation_step == 0:
+            scores.fill_(float('-inf'))
+            if 0 <= self.bos_token_id < vocab_size:
+                scores[:, self.bos_token_id] = 0.0
+        else:
+            if 0 <= self.bos_token_id < vocab_size:
+                scores[:, self.bos_token_id] = float('-inf')
+        return scores
+
+
+def configure_lottie_token_ids(model_path: str) -> None:
+    global LOTTIE_BOS, LOTTIE_EOS, PAD_TOKEN, COMMAND_OFFSET, NUM_COMMANDS, TOKENIZER_LENGTH, LOTTIE_TOKEN_START, LOTTIE_TOKEN_END
+
+    base_tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    base_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    base_vocab_size = getattr(getattr(base_config, "text_config", base_config), "vocab_size")
+    layout = LottieVocabLayout(base_vocab_size=base_vocab_size)
+
+    LOTTIE_BOS = layout.bos_token_id
+    LOTTIE_EOS = layout.eos_token_id
+    PAD_TOKEN = layout.pad_token_id
+    COMMAND_OFFSET = layout.command_offset
+    NUM_COMMANDS = layout.num_commands
+    TOKENIZER_LENGTH = len(base_tokenizer)
+    LOTTIE_TOKEN_START = layout.lottie_token_start
+    LOTTIE_TOKEN_END = layout.lottie_token_end
 
 def sanitize_filename(text, max_length=180):
     text = re.sub(r'[<>:"/\\|?*\n\r\t]', '_', text)
@@ -286,26 +357,37 @@ def generate_lottie(
     }
     
     model.transformer.rope_deltas = None
-    position_ids = None
-    rope_index_fn = getattr(model.transformer, 'get_rope_index', None)
-    if callable(rope_index_fn):
-        position_ids, _ = rope_index_fn(
-            input_ids=inputs['input_ids'],
-            attention_mask=inputs['attention_mask'],
-            image_grid_thw=inputs.get('image_grid_thw'),
-            video_grid_thw=inputs.get('video_grid_thw'))
-        position_ids = position_ids * inputs['attention_mask'][None, ]
+    position_ids, _ = model.transformer.get_rope_index(
+        input_ids=inputs['input_ids'],
+        attention_mask=inputs['attention_mask'],
+        image_grid_thw=inputs.get('image_grid_thw'),
+        video_grid_thw=inputs.get('video_grid_thw'))
+    position_ids = position_ids * inputs['attention_mask'][None, ]
+
+    logits_processor = [
+        LottieBoundaryLogitsProcessor(
+            bos_token_id=LOTTIE_BOS,
+            eos_token_id=LOTTIE_EOS,
+            pad_token_id=PAD_TOKEN,
+            prompt_length=inputs['input_ids'].shape[1],
+            tokenizer_length=TOKENIZER_LENGTH,
+            lottie_token_start=LOTTIE_TOKEN_START,
+            lottie_token_end=LOTTIE_TOKEN_END,
+        )
+    ]
 
     generate_kwargs = {
         'input_ids': inputs['input_ids'],
         'attention_mask': inputs['attention_mask'],
+        'position_ids': position_ids,
         'max_new_tokens': max_new_tokens,
-        'min_new_tokens': 20,  
-        'num_return_sequences': num_candidates,  
+        'min_new_tokens': 20,
+        'num_return_sequences': num_candidates,
         'eos_token_id': LOTTIE_EOS,
         'pad_token_id': PAD_TOKEN,
         'use_cache': True,
         'return_dict_in_generate': True,
+        'logits_processor': logits_processor,
     }
 
     if inputs.get('pixel_values') is not None:
@@ -363,10 +445,12 @@ def generate_lottie(
                 'input_len': input_len,
                 'task_type': inputs.get('task_type', 'unknown'),
                 'generated_len': len(generated_ids),
-                'has_bos': LOTTIE_BOS in generated_ids,
+                'has_bos': len(generated_ids) > 0 and generated_ids[0] == LOTTIE_BOS,
                 'has_eos': LOTTIE_EOS in generated_ids,
-                'valid_lottie_tokens': sum(1 for t in generated_ids if t >= COMMAND_OFFSET),
+                'valid_lottie_tokens': sum(1 for t in generated_ids if COMMAND_OFFSET <= t <= LOTTIE_TOKEN_END),
                 'raw_tokens': generated_ids.copy(),
+                'boundary_constraint_applied': True,
+                'range_constraint_applied': True,
             }
 
             clean_ids = clean_generated_tokens(generated_ids)
@@ -1059,6 +1143,7 @@ def run_batch_text_file_inference(args, cfg):
         raise FileNotFoundError(f"Batch text file not found: {args.batch_text_file}")
 
     print("Loading model...")
+    configure_lottie_token_ids(cfg['tokenizer_name'])
     processor = AutoProcessor.from_pretrained(cfg['tokenizer_name'], padding_side="left")
     processor.tokenizer.padding_side = "left"
 
@@ -1489,6 +1574,7 @@ def run_mmlottie_bench_inference(args, cfg):
 
     print()
     print("Loading model...")
+    configure_lottie_token_ids(cfg['tokenizer_name'])
     processor = AutoProcessor.from_pretrained(cfg['tokenizer_name'], padding_side="left")
     processor.tokenizer.padding_side = "left"
     model = LottieDecoder(pix_len=cfg['pix_len'], text_len=cfg['text_len'])
@@ -1510,6 +1596,7 @@ def run_single_inference(args, cfg):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "xpu:0" if torch.xpu.is_available() else "cpu")
 
     print("Loading model...")
+    configure_lottie_token_ids(cfg['tokenizer_name'])
     processor = AutoProcessor.from_pretrained(cfg['tokenizer_name'], padding_side="left")
     processor.tokenizer.padding_side = "left"
 
