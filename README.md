@@ -1,24 +1,24 @@
 # 50-case-bench_results
 
-This repository stores the **benchmark inference / evaluation scripts** and the **preserved experiment results** used during the OmniLottie benchmark reproduction workflow.
+This repository stores the **benchmark inference / evaluation scripts** together with the **preserved experiment results** produced during the OmniLottie benchmark reproduction workflow.
 
-The goal of this repo is twofold:
-1. keep the scripts that were used to run inference and compute metrics
+Its purpose is twofold:
+1. keep the scripts used to run benchmark inference and compute metrics
 2. keep the original benchmark outputs and final reproduced reports for later inspection
 
 ---
 
-## What is kept in this repository
+## Scope of this repository
 
-This repo intentionally **preserves the original benchmark artifacts** that were already generated.
+This repository intentionally **preserves the benchmark artifacts** that were already generated.
 That includes the final reports and result files under `results/`.
 
-In particular, the following experiment outputs are kept and should remain in the repository:
+In particular, the following outputs are meant to remain in the repository:
 - `results/reproduction/`
 - `results/single_sample_preview/`
 - final merged metrics and markdown reports
 
-So unlike the training-code repo, this benchmark repo is expected to keep the evaluation results themselves.
+So unlike the training-code repository, this benchmark repository is expected to version the evaluation results themselves.
 
 ---
 
@@ -107,11 +107,11 @@ The current README is written to make that explicit: the scripts and the benchma
 ## Usage
 
 Typical workflow:
-1. run remote inference / metric scripts from `scripts/`
-2. sync or post-process results locally with `scripts/`
-3. keep the resulting reports in `results/reproduction/`
+1. run benchmark inference and metric scripts from `scripts/`
+2. post-process or merge outputs with the helper scripts in `scripts/`
+3. keep the resulting reports under `results/reproduction/`
 
-This makes the repository a combined:
+This makes the repository both a:
 - benchmark script archive
 - benchmark result archive
 
