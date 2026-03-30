@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mmlottie_bench_dir", required=True, help="Local MMLottieBench dataset directory")
     parser.add_argument("--split", choices=["real", "synthetic"], required=True)
     parser.add_argument("--mmlottie_task", choices=TASKS, required=True)
-    parser.add_argument("--num_samples", default="150", help="Unified interface: all or a positive integer")
+    parser.add_argument("--num_samples", default="50", help="Unified interface: all or a positive integer")
     parser.add_argument("--maxlen", type=int, default=4096)
     parser.add_argument("--text_len", type=int, default=1500)
     parser.add_argument("--tokenizer_name", default="Qwen/Qwen2.5-VL-3B-Instruct")
@@ -135,7 +135,7 @@ def main() -> None:
 
         copied_files = copy_task_artifacts(original_task_dir, task_output_dir)
         summary = {
-            "runner": "run_omnilottie_original",
+            "runner": "runner_omnilottie_original",
             "model_path": args.sketch_weight,
             "omnilottie_repo": str(repo_root),
             "original_inference_script": str(inference_script),

@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Iterable, List
 
-from model_registry import get_model_spec
+from benchmark_model_registry import get_model_spec
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-path", required=True, help="Checkpoint path or API/model identifier passed to the runner")
     parser.add_argument("--runner-script", default=None, help="Optional custom family runner script. Required for model types without a built-in runner")
     parser.add_argument("--experiment-name", required=True, help="Experiment output directory name under results/pipeline_runs")
-    parser.add_argument("--num-samples", default="150", help="all or a positive integer")
+    parser.add_argument("--num-samples", default="50", help="Sample count: 'all' or a positive integer")
     parser.add_argument("--split", choices=["real", "synthetic", "all"], default="all")
     parser.add_argument("--task", choices=["text2lottie", "text_image2lottie", "video2lottie", "all"], default="all")
     parser.add_argument("--results-root", default=str(DEFAULT_RESULTS_ROOT), help="Root directory for experiment outputs")
@@ -209,11 +209,11 @@ def main() -> None:
             append_jsonl(records_path, record)
 
     if args.run_core_eval:
-        core_cmd = [sys.executable, str(SCRIPT_DIR / "eval_official_core_metrics.py")]
+        core_cmd = [sys.executable, str(SCRIPT_DIR / "benchmark_eval_core.py")]
         run_command(core_cmd, env=env, dry_run=args.dry_run)
 
     if args.run_judge_eval:
-        judge_cmd = [sys.executable, str(SCRIPT_DIR / "eval_official_judge_metrics.py")]
+        judge_cmd = [sys.executable, str(SCRIPT_DIR / "benchmark_eval_judge.py")]
         run_command(judge_cmd, env=env, dry_run=args.dry_run)
 
     print(f"Pipeline complete. Outputs: {experiment_root}")

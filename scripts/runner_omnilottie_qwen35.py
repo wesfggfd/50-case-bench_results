@@ -1718,7 +1718,7 @@ if __name__ == "__main__":
     parser.add_argument("--max_samples", type=int, default=-1,
                         help="Maximum samples to process (-1 = all)")
     parser.add_argument("--num_samples", type=str, default=None,
-                        help="Unified sample count interface: all or a positive integer. Overrides --max_samples when provided.")
+                        help="Selectable sample count interface: use 'all' or a positive integer. Overrides --max_samples when provided.")
     parser.add_argument("--task_filter", type=str,
                         choices=['video', 'image', 'text', 'text2lottie', 'text_image2lottie', 'video2lottie'],
                         default=None, help="Only process specific task type")

@@ -42,13 +42,16 @@ Final benchmark reproduction outputs, including:
 - `judge_metrics_report_public_local_claude35_aihhhl.json`
 
 ### `scripts/`
-All benchmark inference and evaluation logic is now kept directly under `scripts/`.
-This includes:
-- inference
-- official metric evaluation
-- judge-based evaluation
-- metric recomputation / correction
-- sync / merge helper scripts
+Only the current unified benchmark interface is kept under `scripts/`.
+Legacy one-off helper scripts have been removed.
+The remaining entrypoints are:
+- `benchmark_pipeline.py` — unified inference + evaluation launcher
+- `benchmark_model_registry.py` — model family registry
+- `runner_omnilottie_qwen35.py` — current OmniLottie Qwen3.5 runner
+- `runner_omnilottie_original.py` — original OmniLottie wrapper runner
+- `runner_family_stub.py` — placeholder runner for new model families
+- `benchmark_eval_core.py` — automated core metrics evaluation
+- `benchmark_eval_judge.py` — automated judge-based evaluation
 
 ---
 
@@ -107,9 +110,9 @@ The current README is written to make that explicit: the scripts and the benchma
 ## Usage
 
 Typical workflow:
-1. run benchmark inference and metric scripts from `scripts/`
-2. post-process or merge outputs with the helper scripts in `scripts/`
-3. keep the resulting reports under `results/reproduction/`
+1. run `scripts/benchmark_pipeline.py`
+2. optionally enable automated core / judge evaluation in the same command
+3. keep the resulting reports under `results/reproduction/` or `results/pipeline_runs/`
 
 This makes the repository both a:
 - benchmark script archive
@@ -129,11 +132,11 @@ Current registered model types include:
 Example for the built-in OmniLottie Qwen3.5 path:
 
 ```bash
-python scripts/run_pipeline.py \
+python scripts/benchmark_pipeline.py \
   --model-type omnilottie_qwen35 \
   --model-path /path/to/checkpoint \
-  --experiment-name omnilottie_real_synth_150 \
-  --num-samples 150 \
+  --experiment-name omnilottie_real_synth_50 \
+  --num-samples 50 \
   --split all \
   --task all \
   --run-core-eval
@@ -142,19 +145,21 @@ python scripts/run_pipeline.py \
 For model types without a built-in runner yet, provide a custom family runner:
 
 ```bash
-python scripts/run_pipeline.py \
+python scripts/benchmark_pipeline.py \
   --model-type deepseekv3 \
   --model-path /path/to/model_or_api_config \
-  --runner-script scripts/family_runner_stub.py \
-  --experiment-name deepseek_text_150 \
-  --num-samples 150 \
+  --runner-script scripts/runner_family_stub.py \
+  --experiment-name deepseek_text_20 \
+  --num-samples 20 \
   --split all \
   --task text2lottie
 ```
 
-Supported sample count values:
+Supported sample count values are selectable, for example:
 - `--num-samples all`
-- `--num-samples 150`
+- `--num-samples 10`
+- `--num-samples 20`
+- `--num-samples 50`
 - `--num-samples N`
 
 Outputs are written under:
@@ -187,11 +192,11 @@ export BENCH_JUDGE_MODEL="claude-sonnet-4-6"
 Then run:
 
 ```bash
-python scripts/run_pipeline.py \
+python scripts/benchmark_pipeline.py \
   --model-type omnilottie_qwen35 \
   --model-path /path/to/checkpoint \
-  --experiment-name omnilottie_150_with_judge \
-  --num-samples 150 \
+  --experiment-name omnilottie_50_with_judge \
+  --num-samples 50 \
   --split all \
   --task all \
   --run-core-eval \

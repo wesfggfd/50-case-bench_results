@@ -16,7 +16,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mmlottie_bench_dir", required=True)
     parser.add_argument("--split", choices=["real", "synthetic"], required=True)
     parser.add_argument("--mmlottie_task", choices=TASKS, required=True)
-    parser.add_argument("--num_samples", default="150")
+    parser.add_argument("--num_samples", default="50")
     parser.add_argument("--maxlen", type=int, default=4096)
     parser.add_argument("--text_len", type=int, default=1500)
     parser.add_argument("--tokenizer_name", default=None)
@@ -40,7 +40,7 @@ def main() -> None:
     task_dir.mkdir(parents=True, exist_ok=True)
 
     manifest = {
-        "runner": "family_runner_stub",
+        "runner": "runner_family_stub",
         "model_path": args.sketch_weight,
         "split": args.split,
         "task": args.mmlottie_task,
