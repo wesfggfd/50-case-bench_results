@@ -40,6 +40,11 @@ TASK_ORDER = [
     ('text2lottie', 'Text-to-Lottie'),
     ('text_image2lottie', 'Text-Image-to-Lottie'),
 ]
+BENCH_VIDEO_FPS = 8.0
+BENCH_VIDEO_WIDTH = 336
+BENCH_VIDEO_HEIGHT = 336
+BENCH_VIDEO_FRAME_COUNT = 16
+JUDGE_FRAME_SIZE = 224
 RENDER_CACHE = Path('/root/SVG Generation/results/render_cache_official')
 CACHE_ROOT = Path('/root/SVG Generation/results/judge_cache_official_claude46')
 REPORT_PATH = Path('/root/SVG Generation/OmniLottie/reproduction_results/judge_metrics_report.json')
@@ -100,7 +105,7 @@ def ensure_render(split: str, task_key: str, sample_id: str, result_dir: Path) -
     return out_path
 
 
-def sample_frames(video_path: str, num_frames: int = 8):
+def sample_frames(video_path: str, num_frames: int = BENCH_VIDEO_FRAME_COUNT):
     cap = cv2.VideoCapture(video_path)
     frames = []
     while True:
@@ -114,7 +119,7 @@ def sample_frames(video_path: str, num_frames: int = 8):
     idx = sorted(set(int(x) for x in np.linspace(0, len(frames) - 1, min(num_frames, len(frames)))))
     encoded = []
     for i in idx:
-        img = Image.fromarray(frames[i]).convert('RGB').resize((224, 224))
+        img = Image.fromarray(frames[i]).convert('RGB').resize((JUDGE_FRAME_SIZE, JUDGE_FRAME_SIZE))
         buf = io.BytesIO()
         img.save(buf, format='PNG')
         encoded.append(base64.b64encode(buf.getvalue()).decode())

@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import torch
 import argparse
@@ -19,10 +20,23 @@ from typing import List, Dict, Set, Optional, Tuple
 from safetensors.torch import load_file
 from huggingface_hub import snapshot_download
 from datasets import load_dataset, load_from_disk
-from decoder import LottieDecoder
-from transformers import AutoTokenizer, AutoProcessor
+from transformers import AutoConfig, AutoTokenizer, AutoProcessor
+from peft import LoraConfig, get_peft_model
 from qwen_vl_utils import process_vision_info
-from decord import VideoReader, cpu
+
+REMOTE_FILE_DIR = Path(__file__).resolve().parent
+OMNILOTTIE_ROOT = Path(os.environ.get("OMNILOTTIE_ROOT", "/opt/liblibai-models/user-workspace2/users/Sean_CHEN/OmniLottie_training/OmniLottie"))
+for candidate in (OMNILOTTIE_ROOT, OMNILOTTIE_ROOT.parent, REMOTE_FILE_DIR):
+    candidate_str = str(candidate)
+    if candidate_str not in sys.path:
+        sys.path.insert(0, candidate_str)
+
+from decoder import LottieDecoder
+try:
+    from decord import VideoReader, cpu
+except Exception:
+    VideoReader = None
+    cpu = None
 
 from lottie.objects.lottie_tokenize import LottieTensor
 from lottie.objects.lottie_param import (
@@ -31,6 +45,8 @@ from lottie.objects.lottie_param import (
     shape_layer_to_json, null_layer_to_json, precomp_layer_to_json,
     text_layer_to_json, solid_layer_to_json, font_to_json, char_to_json
 )
+from lottie.exporters.video import export_video
+from lottie.parsers.tgs import parse_tgs
 
 from PIL import Image as PILImage
 
@@ -42,16 +58,31 @@ torch.backends.cudnn.deterministic = True
 TASK_VIDEO = "video"
 TASK_IMAGE = "image"
 TASK_TEXT = "text"
+BENCH_TASK_LABELS = {
+    "text2lottie": "Text-to-Lottie",
+    "text_image2lottie": "Text-Image-to-Lottie",
+    "video2lottie": "Video-to-Lottie",
+}
 
-SYSTEM_PROMPT = "You are a Lottie animation expert."  
+SYSTEM_PROMPT = "You are a Lottie animation expert."
 VIDEO_PROMPT = "Turn this video into Lottie code."
- 
-# Lottie token IDs
-LOTTIE_BOS = 192398
-LOTTIE_EOS = 192399
-PAD_TOKEN = 151643
-COMMAND_OFFSET = 151936
-NUM_COMMANDS = 282
+BENCH_RENDER_FPS = 8.0
+BENCH_RENDER_WIDTH = 336
+BENCH_RENDER_HEIGHT = 336
+BENCH_RENDER_FRAME_COUNT = 16
+BENCH_DATA_ROOT = Path(os.environ.get("MMLOTTIE_BENCH_DATA_ROOT", "/opt/liblibai-models/user-workspace2/dataset/MMLottieBench/data"))
+
+# Lottie token IDs — Qwen3.5-9B
+# config.text_config.vocab_size=248320, ORIGINAL_BASE=151643 → shift=96677
+# ORIGINAL offsets: CMD=151936, NUM=173186, BOS=192398, EOS=192399, PAD=151643
+_QWEN35_BASE_VOCAB_SIZE = 248320   # Qwen3.5-9B text_config.vocab_size
+_ORIGINAL_BASE_VOCAB_SIZE = 151643
+_LOTTIE_SHIFT = _QWEN35_BASE_VOCAB_SIZE - _ORIGINAL_BASE_VOCAB_SIZE  # 96677
+LOTTIE_BOS     = 192398 + _LOTTIE_SHIFT  # 289075
+LOTTIE_EOS     = 192399 + _LOTTIE_SHIFT  # 289076
+PAD_TOKEN      = 151643 + _LOTTIE_SHIFT  # 248320
+COMMAND_OFFSET = 151936 + _LOTTIE_SHIFT  # 248613
+NUM_COMMANDS   = 282  # unchanged
 
 def sanitize_filename(text, max_length=180):
     text = re.sub(r'[<>:"/\\|?*\n\r\t]', '_', text)
@@ -106,19 +137,21 @@ def load_frames_from_video(video_path, num_frames=8, target_size=(336, 336)):
 
     return frames
 
-def build_video_messages(frames: List[PILImage.Image], fps: float = 8.0):
+def build_video_messages(frames: List[PILImage.Image], fps: float = 8.0, text_description: Optional[str] = None):
+    prompt = text_description or VIDEO_PROMPT
     return [{
         "role": "system",
         "content": SYSTEM_PROMPT
     }, {
         "role": "user",
         "content": [
-            {"type": "video", "video": frames, "fps": fps},  
-            {"type": "text", "text": VIDEO_PROMPT}
+            {"type": "video", "video": frames, "fps": fps},
+            {"type": "text", "text": prompt}
         ]
     }]
 
 def build_image_messages(image, text_description):
+    prompt = text_description or "Animate this image."
     return [{
         "role": "system",
         "content": SYSTEM_PROMPT
@@ -126,19 +159,20 @@ def build_image_messages(image, text_description):
         "role": "user",
         "content": [
             {"type": "image", "image": image},
-            {"type": "text", "text": f"Animate this image: {text_description}"}
+            {"type": "text", "text": f"Animate this image: {prompt}"}
         ]
     }]
 
 def build_text_messages(text_description):
 
+    prompt = text_description or "Generate a vivid Lottie animation."
     messages = [{
         "role": "system",
         "content": SYSTEM_PROMPT
     }, {
         "role": "user",
         "content": [
-            {"type": "text", "text": f"Generate Lottie code: {text_description}"}
+            {"type": "text", "text": f"Generate Lottie code: {prompt}"}
         ]
     }]
 
@@ -252,17 +286,19 @@ def generate_lottie(
     }
     
     model.transformer.rope_deltas = None
-    position_ids, _ = model.transformer.get_rope_index(
-        input_ids=inputs['input_ids'],
-        attention_mask=inputs['attention_mask'],
-        image_grid_thw=inputs.get('image_grid_thw'),
-        video_grid_thw=inputs.get('video_grid_thw'))
-    position_ids = position_ids * inputs['attention_mask'][None, ]
+    position_ids = None
+    rope_index_fn = getattr(model.transformer, 'get_rope_index', None)
+    if callable(rope_index_fn):
+        position_ids, _ = rope_index_fn(
+            input_ids=inputs['input_ids'],
+            attention_mask=inputs['attention_mask'],
+            image_grid_thw=inputs.get('image_grid_thw'),
+            video_grid_thw=inputs.get('video_grid_thw'))
+        position_ids = position_ids * inputs['attention_mask'][None, ]
 
     generate_kwargs = {
         'input_ids': inputs['input_ids'],
         'attention_mask': inputs['attention_mask'],
-        'position_ids': position_ids,  
         'max_new_tokens': max_new_tokens,
         'min_new_tokens': 20,  
         'num_return_sequences': num_candidates,  
@@ -295,7 +331,7 @@ def generate_lottie(
             print(f"  Using sampling: temp={temperature}, top_p={top_p}, top_k={top_k}")
     else:
         generate_kwargs.update({
-            'do_sample': True,
+            'do_sample': False,
             'num_beams': 1,
         })
         if verbose:
@@ -529,14 +565,14 @@ def tokens_to_lottie_json(generated_ids: List[int], default_json: dict = None, v
             "v": "5.5.2", "fr": 8, "ip": 0, "op": 16,
             "w": 512, "h": 512, "nm": "Animation", "ddd": 0
         }
-    
+
     if verbose:
         print(f"  Converting {len(generated_ids)} tokens to Lottie JSON...")
-    
+
     reconstructed_tensor = LottieTensor.from_list(generated_ids)
     reconstructed_sequence = reconstructed_tensor.to_sequence()
     reconstructed = from_sequence(reconstructed_sequence)
-    
+
     json_animation = {
         "v": reconstructed.get("v", default_json.get("v", "5.5.2")),
         "fr": reconstructed.get("fr", default_json.get("fr", 8)),
@@ -549,7 +585,7 @@ def tokens_to_lottie_json(generated_ids: List[int], default_json: dict = None, v
         "assets": [],
         "layers": [],
     }
-    
+
     if "markers" in reconstructed:
         json_animation["markers"] = reconstructed.get("markers", [])
     if "props" in reconstructed:
@@ -574,7 +610,7 @@ def tokens_to_lottie_json(generated_ids: List[int], default_json: dict = None, v
             else:
                 chars_json.append(char)
         json_animation["chars"] = chars_json
-      
+
     for asset in reconstructed.get("assets", []):
         asset_json = dict(asset)
         if "layers" in asset:
@@ -592,7 +628,7 @@ def tokens_to_lottie_json(generated_ids: List[int], default_json: dict = None, v
                     asset_json["layers"].append(solid_layer_to_json(layer))
                 else:
                     asset_json["layers"].append(layer)
-        json_animation["assets"].append(asset_json)  
+        json_animation["assets"].append(asset_json)
 
     # 处理layers
     for layer in reconstructed.get("layers", []):
@@ -610,8 +646,170 @@ def tokens_to_lottie_json(generated_ids: List[int], default_json: dict = None, v
             json_animation["layers"].append(layer)
 
     json_animation = fix_lottie_json(json_animation)
-    
+
     return json_animation
+
+
+def create_lottie_html(animation_data, height=600):
+    animation_json = json.dumps(animation_data, ensure_ascii=False)
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <script src=\"https://cdnjs.cloudflare.com/ajax/libs/bodymovin/5.12.2/lottie.min.js\"></script>
+  <style>
+    body {{ margin: 0; padding: 0; background: #111; color: #eee; font-family: sans-serif; }}
+    #lottie-animation {{ width: 100%; max-width: 900px; height: {height}px; margin: 0 auto; }}
+    .meta {{ padding: 12px 16px; font-size: 14px; }}
+  </style>
+</head>
+<body>
+  <div class=\"meta\">Lottie preview</div>
+  <div id=\"lottie-animation\"></div>
+  <script>
+    const animationData = {animation_json};
+    lottie.loadAnimation({{
+      container: document.getElementById('lottie-animation'),
+      renderer: 'svg',
+      loop: true,
+      autoplay: true,
+      animationData: animationData
+    }});
+  </script>
+</body>
+</html>"""
+
+
+def probe_video_metadata(video_path: str) -> dict:
+    try:
+        import cv2 as _cv2
+    except Exception as exc:
+        raise ImportError("probe_video_metadata requires cv2/opencv-python") from exc
+    cap = _cv2.VideoCapture(video_path)
+    try:
+        if not cap.isOpened():
+            raise ValueError(f'Unable to open video: {video_path}')
+        fps = float(cap.get(_cv2.CAP_PROP_FPS) or 0.0)
+        frame_count = int(cap.get(_cv2.CAP_PROP_FRAME_COUNT) or 0)
+        width = int(cap.get(_cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        height = int(cap.get(_cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        duration = (frame_count / fps) if fps > 0 else None
+        return {
+            'fps': fps if fps > 0 else BENCH_RENDER_FPS,
+            'frame_count': frame_count if frame_count > 0 else BENCH_RENDER_FRAME_COUNT,
+            'width': width if width > 0 else BENCH_RENDER_WIDTH,
+            'height': height if height > 0 else BENCH_RENDER_HEIGHT,
+            'duration': duration if duration is not None else BENCH_RENDER_FRAME_COUNT / BENCH_RENDER_FPS,
+        }
+    finally:
+        cap.release()
+
+
+def _apply_render_metadata(animation_data: dict, *, fps: Optional[float] = None, width: Optional[int] = None, height: Optional[int] = None, frame_count: Optional[int] = None) -> dict:
+    anim = copy.deepcopy(animation_data)
+    fps = BENCH_RENDER_FPS if fps is None or fps <= 0 else fps
+    width = BENCH_RENDER_WIDTH if width is None or width <= 0 else width
+    height = BENCH_RENDER_HEIGHT if height is None or height <= 0 else height
+    frame_count = BENCH_RENDER_FRAME_COUNT if frame_count is None or frame_count <= 0 else frame_count
+    anim['fr'] = float(fps)
+    anim['w'] = int(width)
+    anim['h'] = int(height)
+    anim['ip'] = int(round(float(anim.get('ip', 0))))
+    anim['op'] = anim['ip'] + int(frame_count)
+    if anim['op'] <= anim['ip']:
+        anim['op'] = anim['ip'] + int(frame_count)
+    return anim
+
+
+def render_lottie_mp4(animation_data: dict, output_path: str, *, reference_video_path: Optional[str] = None) -> str:
+    render_anim = animation_data
+    meta = None
+    if reference_video_path:
+        meta = probe_video_metadata(reference_video_path)
+        render_anim = _apply_render_metadata(
+            animation_data,
+            fps=meta['fps'],
+            width=meta['width'],
+            height=meta['height'],
+            frame_count=meta['frame_count'],
+        )
+    else:
+        render_anim = _apply_render_metadata(animation_data)
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8') as tmp_json:
+        json.dump(render_anim, tmp_json, ensure_ascii=False)
+        tmp_json_path = tmp_json.name
+    try:
+        anim = parse_tgs(tmp_json_path)
+        export_video(anim, output_path, format='mp4')
+        return output_path
+    finally:
+        try:
+            os.unlink(tmp_json_path)
+        except OSError:
+            pass
+
+
+def _apply_lora_to_decoder(model, lora_rank=64, lora_alpha=128, lora_dropout=0.05):
+    """Apply LoRA wrapping to the decoder's transformer, matching training config."""
+    lora_config = LoraConfig(
+        r=lora_rank,
+        lora_alpha=lora_alpha,
+        lora_dropout=lora_dropout,
+        bias="none",
+        task_type="CAUSAL_LM",
+        target_modules=LottieDecoder.default_lora_target_modules(),
+    )
+    model.transformer = get_peft_model(model.transformer, lora_config)
+    print(f"  Applied LoRA wrapping (rank={lora_rank}, alpha={lora_alpha})")
+    return model
+
+
+def load_model_weights_into_decoder(model, sketch_weight: str, *, strict: bool = False):
+    if os.path.isfile(sketch_weight) and sketch_weight.endswith('.bin'):
+        model_path = sketch_weight
+        safetensors_path = sketch_weight.replace('.bin', '.safetensors')
+    else:
+        model_path = os.path.join(sketch_weight, 'pytorch_model.bin')
+        safetensors_path = os.path.join(sketch_weight, 'model.safetensors')
+
+    if os.path.exists(model_path):
+        state_dict = torch.load(model_path, map_location='cpu')
+        source_path = model_path
+    elif os.path.exists(safetensors_path):
+        state_dict = load_file(safetensors_path)
+        source_path = safetensors_path
+    else:
+        raise FileNotFoundError(f"Model not found in {sketch_weight}")
+
+    # Detect LoRA checkpoint: keys contain 'base_model.model.' prefix
+    has_lora_keys = any('lora_' in k for k in state_dict.keys())
+    has_peft_prefix = any('base_model.model.' in k for k in state_dict.keys())
+
+    if has_lora_keys and has_peft_prefix:
+        # Checkpoint is from LoRA-wrapped training — apply LoRA wrapping first
+        print(f"  Detected LoRA checkpoint ({sum(1 for k in state_dict if 'lora_' in k)} LoRA keys)")
+        model = _apply_lora_to_decoder(model)
+
+    incompatible = model.load_state_dict(state_dict, strict=strict)
+    missing = list(getattr(incompatible, 'missing_keys', []))
+    unexpected = list(getattr(incompatible, 'unexpected_keys', []))
+    print(f"Loaded from {source_path} (strict={strict})")
+    if missing or unexpected:
+        print(f"  Missing keys: {len(missing)}")
+        print(f"  Unexpected keys: {len(unexpected)}")
+        if missing:
+            print(f"  Missing preview: {missing[:12]}")
+        if unexpected:
+            print(f"  Unexpected preview: {unexpected[:12]}")
+
+    # Merge LoRA weights into base model for faster inference
+    if has_lora_keys and has_peft_prefix:
+        print("  Merging LoRA weights into base model...")
+        model.transformer = model.transformer.merge_and_unload()
+        print("  LoRA merged successfully")
+
+    return source_path
 
 def run_inference(
     model,
@@ -619,43 +817,48 @@ def run_inference(
     task_type: str,
     device,
     cfg: dict,
-    uid: str = None, 
+    uid: str = None,
     video_path: str = None,
     image_path: str = None,
     text_description: str = None,
     use_sampling: bool = False,
     temperature: float = 0.9,
     top_p: float = 0.25,
-    top_k: int = 5,  
+    top_k: int = 5,
     repetition_penalty: float = 1.01,
     output_path: str = None,
+    save_mp4: bool = True,
+    render_reference_video_path: str = None,
     verbose: bool = True) -> Tuple[dict, dict]:
 
 
-    prompt_info = None  #
-    if task_type == TASK_VIDEO:
+    prompt_info = None
+    task_type = _normalize_task_type(task_type)
+    if task_type == "video2lottie":
         if not video_path:
             raise ValueError("video_path required for video task")
+        if VideoReader is None or cpu is None:
+            raise ImportError("video task requires decord to be installed")
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"Video path does not exist: {video_path}")
         video_path = os.path.abspath(video_path)
         frames = load_frames_from_video(video_path, num_frames=8)
-        messages = build_video_messages(frames, fps=8.0)
+        messages = build_video_messages(frames, fps=8.0, text_description=text_description)
 
-    elif task_type == TASK_IMAGE:
-        if not image_path:
-            raise ValueError("image_path required for image task")
+    elif task_type == "text_image2lottie":
+        if image_path is None:
+            raise ValueError("image_path required for text-image task")
         img = PILImage.open(image_path)
         img = add_random_background(img) if img.mode == 'RGBA' else img.convert('RGB')
         img = img.resize((448, 448), PILImage.LANCZOS)
-        desc = text_description or "A simple animation"
+        desc = text_description or "Describe the image and animate it."
         messages = build_image_messages(img, desc)
-    elif task_type == TASK_TEXT:
+    elif task_type == "text2lottie":
         desc = text_description or "A simple animation"
         messages = build_text_messages(desc)
         if len(messages) > 2 and "prompt_info" in messages[-1]:
             prompt_info = messages[-1]["prompt_info"]
-            messages = messages[:-1]  
+            messages = messages[:-1]
     else:
         raise ValueError(f"Unknown task type: {task_type}")
 
@@ -670,6 +873,7 @@ def run_inference(
     if verbose:
         print(f"\nTask: {task_type}")
         print(f"Context length: {inputs['context_len']}")
+        print(f"Prompt length: {len(text_description or '')}")
 
     num_candidates = cfg.get('num_candidates', 1)
     candidates_list = generate_lottie(
@@ -719,6 +923,26 @@ def run_inference(
     if len(processed_candidates) == 0:
         if verbose:
             print(f"  ERROR: All {num_candidates} candidates failed")
+        if candidates_list:
+            fallback_ids, fallback_info = candidates_list[0]
+            fallback_json = None
+            try:
+                fallback_json = tokens_to_lottie_json(fallback_ids, verbose=False)
+            except Exception:
+                fallback_json = None
+            if fallback_json is not None:
+                fallback_info['is_valid'] = False
+                fallback_info['fallback_used'] = True
+                if output_path:
+                    with open(output_path, 'w', encoding='utf-8') as f:
+                        json.dump(fallback_json, f, indent=2, ensure_ascii=False)
+                    html_path = output_path.replace('.json', '.html')
+                    with open(html_path, 'w', encoding='utf-8') as f:
+                        f.write(create_lottie_html(fallback_json))
+                    if save_mp4:
+                        mp4_path = output_path.replace('.json', '.mp4')
+                        render_lottie_mp4(fallback_json, mp4_path, reference_video_path=render_reference_video_path)
+                return fallback_json, fallback_info
         return None, candidates_list[0][1] if candidates_list else {}
 
     if len(processed_candidates) == 1:
@@ -732,6 +956,9 @@ def run_inference(
             (lottie_json, token_ids, has_eos, cand_idx)
             for lottie_json, token_ids, has_eos, cand_idx, _ in processed_candidates
         ]
+        best_idx = 0
+        best_score = None
+        best_details = None
 
     lottie_json, generated_ids, has_eos, selected_cand_idx, gen_info = processed_candidates[best_idx]
 
@@ -748,23 +975,37 @@ def run_inference(
         print(f"  WARNING: Lottie may be invalid: {gen_info.get('issues', [])}")
 
     if output_path:
-        with open(output_path, 'w') as f:
-            json.dump(lottie_json, f, indent=2)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(lottie_json, f, indent=2, ensure_ascii=False)
+        html_path = output_path.replace('.json', '.html')
+        with open(html_path, 'w', encoding='utf-8') as f:
+            f.write(create_lottie_html(lottie_json))
+        mp4_path = None
+        if save_mp4:
+            mp4_path = output_path.replace('.json', '.mp4')
+            render_lottie_mp4(
+                lottie_json,
+                mp4_path,
+                reference_video_path=render_reference_video_path,
+            )
         if verbose:
             print(f"  Saved to: {output_path}")
+            print(f"  Saved preview to: {html_path}")
+            if mp4_path:
+                print(f"  Saved video to: {mp4_path}")
 
         # Save all candidates when num_candidates > 1
         if num_candidates > 1 and len(processed_candidates) > 1:
             base_path = output_path.replace('.json', '')
             for idx, (cand_lottie, cand_tokens, cand_has_eos, cand_idx, cand_info) in enumerate(processed_candidates):
                 cand_path = f"{base_path}_candidate_{cand_idx}.json"
-                with open(cand_path, 'w') as f:
-                    json.dump(cand_lottie, f, indent=2)
+                with open(cand_path, 'w', encoding='utf-8') as f:
+                    json.dump(cand_lottie, f, indent=2, ensure_ascii=False)
                 if verbose:
                     print(f"  Saved candidate {cand_idx} to: {cand_path}")
 
         info_path = output_path.replace('.json', '_info.txt')
-        with open(info_path, 'w') as f:
+        with open(info_path, 'w', encoding='utf-8') as f:
             f.write(f"=== Generation Info ===\n")
             f.write(f"UID: {uid}\n")
             f.write(f"Task: {task_type}\n")
@@ -831,14 +1072,7 @@ def run_batch_text_file_inference(args, cfg):
         model_path = os.path.join(args.sketch_weight, 'pytorch_model.bin')
         safetensors_path = os.path.join(args.sketch_weight, 'model.safetensors')
 
-    if os.path.exists(model_path):
-        model.load_state_dict(torch.load(model_path, map_location='cpu'))
-        print(f"Loaded from {model_path}")
-    elif os.path.exists(safetensors_path):
-        model.load_state_dict(load_file(safetensors_path))
-        print(f"Loaded from {safetensors_path}")
-    else:
-        raise FileNotFoundError(f"Model not found in {args.sketch_weight}")
+    load_model_weights_into_decoder(model, args.sketch_weight, strict=False)
 
     model = model.to(device).eval()
 
@@ -909,131 +1143,205 @@ def run_batch_text_file_inference(args, cfg):
     print(f"{'='*60}")
 
 # ========== MMLottie Benchmark 推理 ==========
-def run_mmlottie_bench_inference(args, cfg):
-    """
-    Inference on MMLottieBench dataset from HuggingFace
-    
-    Dataset structure:
-        - Splits: real, synthetic
-        - Task types: Text-to-Lottie, Text-Image-to-Lottie, Video-to-Lottie
-        - Fields: id, text, image, video, task_type, subset, etc.
-    """
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "xpu:0" if torch.xpu.is_available() else "cpu")
-    print(f"Using device: {device}")
-
-    # 1. Load dataset
-    print("\nLoading MMLottieBench dataset...")
-    try:
-        # Try to load from local directory first
-        if os.path.exists(args.mmlottie_bench_dir) and os.path.isdir(args.mmlottie_bench_dir):
-            try:
-                print(f"  Attempting to load from local: {args.mmlottie_bench_dir}")
-                dataset = load_from_disk(args.mmlottie_bench_dir)
-                print(f"  ✅ Loaded from local directory")
-            except Exception as e:
-                print(f"  ⚠️  Local load failed: {e}")
-                print(f"  Downloading from HuggingFace...")
-                dataset = load_dataset("OmniLottie/MMLottieBench")
-        else:
-            print(f"  Local directory not found, downloading from HuggingFace...")
-            dataset = load_dataset("OmniLottie/MMLottieBench")
-            
-        print(f"  Available splits: {list(dataset.keys())}")
-        
-    except Exception as e:
-        print(f"\n❌ Failed to load dataset: {e}")
-        print("Please check your network or download manually using:")
-        print("  python download_mmlottie_bench.py")
-        raise
-
-    # 2. Select split
-    if args.split not in dataset:
-        raise ValueError(f"Split '{args.split}' not found in dataset. Available: {list(dataset.keys())}")
-    
-    subset = dataset[args.split]
-    print(f"\nProcessing split: {args.split}")
-    print(f"  Total samples: {len(subset)}")
-
-    # 3. Load model
-    print("\nLoading model...")
-    processor = AutoProcessor.from_pretrained(cfg['tokenizer_name'], padding_side="left")
-    processor.tokenizer.padding_side = "left"
-
-    model = LottieDecoder(pix_len=cfg['pix_len'], text_len=cfg['text_len'])
-
-    if os.path.isfile(args.sketch_weight) and args.sketch_weight.endswith('.bin'):
-        model_path = args.sketch_weight
-        safetensors_path = args.sketch_weight.replace('.bin', '.safetensors')
-    else:
-        model_path = os.path.join(args.sketch_weight, 'pytorch_model.bin')
-        safetensors_path = os.path.join(args.sketch_weight, 'model.safetensors')
-
-    if os.path.exists(model_path):
-        model.load_state_dict(torch.load(model_path, map_location='cpu'))
-        print(f"Loaded from {model_path}")
-    elif os.path.exists(safetensors_path):
-        model.load_state_dict(load_file(safetensors_path))
-        print(f"Loaded from {safetensors_path}")
-    else:
-        raise FileNotFoundError(f"Model not found in {args.sketch_weight}")
-
-    model = model.to(device).eval()
-
-    # 4. Filter by task type if specified
-    task_map = {
-        'text2lottie': 'Text-to-Lottie',
-        'text_image2lottie': 'Text-Image-to-Lottie',
-        'video2lottie': 'Video-to-Lottie'
+def _normalize_task_type(value: Optional[str]) -> str:
+    if value is None:
+        return "text2lottie"
+    value = str(value).strip().lower().replace("-", "_")
+    aliases = {
+        "text": "text2lottie",
+        "text2lottie": "text2lottie",
+        "text_to_lottie": "text2lottie",
+        "text_image": "text_image2lottie",
+        "text_image2lottie": "text_image2lottie",
+        "text_image_to_lottie": "text_image2lottie",
+        "image": "text_image2lottie",
+        "video": "video2lottie",
+        "video2lottie": "video2lottie",
+        "video_to_lottie": "video2lottie",
     }
-    
-    if args.mmlottie_task:
-        task_type_filter = task_map.get(args.mmlottie_task)
-        if task_type_filter:
-            subset = subset.filter(lambda x: x.get('task_type') == task_type_filter)
-            print(f"  Task filter: {args.mmlottie_task} ({task_type_filter})")
-            print(f"  Filtered samples: {len(subset)}")
-        else:
-            print(f"  ⚠️  Unknown task: {args.mmlottie_task}, processing all tasks")
+    return aliases.get(value, value)
+
+
+def _bench_task_label(task_key: str) -> str:
+    task_key = _normalize_task_type(task_key)
+    if task_key not in BENCH_TASK_LABELS:
+        raise ValueError(f"Unsupported benchmark task key: {task_key}")
+    return BENCH_TASK_LABELS[task_key]
+
+
+def _sample_task_key(sample: dict) -> Optional[str]:
+    raw_task = sample.get("task_type")
+    if raw_task is None:
+        return None
+    return _normalize_task_type(raw_task)
+
+
+def _infer_text_prompt(sample: dict) -> str:
+    for key in ("text", "prompt", "description", "caption", "instruction"):
+        value = sample.get(key)
+        if value:
+            return str(value)
+    return "Generate a vivid Lottie animation."
+
+
+def _build_text_only_prompt(sample: dict) -> str:
+    prompt = _infer_text_prompt(sample)
+    return prompt if prompt else "Generate a vivid Lottie animation."
+
+
+def _sample_task_matches(sample: dict, requested_task: str) -> bool:
+    sample_task = _sample_task_key(sample)
+    if sample_task is None:
+        return False
+    return sample_task == _normalize_task_type(requested_task)
+
+
+def _validate_bench_sample_fields(sample: dict, task_key: str) -> None:
+    task_key = _normalize_task_type(task_key)
+    text_value = sample.get('text')
+    image_value = sample.get('image')
+    video_value = sample.get('video')
+    if task_key == 'text2lottie':
+        if not text_value:
+            raise ValueError('text2lottie sample is missing text')
+        if image_value is not None or video_value is not None:
+            raise ValueError('text2lottie sample must not contain image or video inputs')
+    elif task_key == 'text_image2lottie':
+        if not text_value:
+            raise ValueError('text_image2lottie sample is missing text')
+        if image_value is None:
+            raise ValueError('text_image2lottie sample is missing image')
+        if video_value is not None:
+            raise ValueError('text_image2lottie sample must not contain video input')
+    elif task_key == 'video2lottie':
+        if not text_value:
+            raise ValueError('video2lottie sample is missing text')
+        if video_value is None:
+            raise ValueError('video2lottie sample is missing video')
+        if image_value is not None:
+            raise ValueError('video2lottie sample must not contain image input')
     else:
-        print(f"  Processing all task types")
+        raise ValueError(f'Unsupported benchmark task key: {task_key}')
 
-    # 5. Prepare output directories
-    output_base = os.path.join(args.output_dir, f'mmlottie_bench_{args.split}')
-    os.makedirs(output_base, exist_ok=True)
-    
-    stats = {
-        'Text-to-Lottie': {'success': 0, 'fail': 0, 'total': 0},
-        'Text-Image-to-Lottie': {'success': 0, 'fail': 0, 'total': 0},
-        'Video-to-Lottie': {'success': 0, 'fail': 0, 'total': 0}
-    }
 
-    # 6. Process each sample
-    print(f"\n{'='*60}")
-    print("Starting inference...")
-    print(f"{'='*60}\n")
+def _coerce_image_path(image_value, *, output_dir: str, sample_id: str) -> Tuple[str, List[str]]:
+    cleanup_paths: List[str] = []
+    if isinstance(image_value, str):
+        if not os.path.exists(image_value):
+            raise FileNotFoundError(f"Image path does not exist: {image_value}")
+        return image_value, cleanup_paths
+    if isinstance(image_value, dict) and image_value.get("path"):
+        image_path = image_value["path"]
+        if not os.path.exists(image_path):
+            raise FileNotFoundError(f"Image path does not exist: {image_path}")
+        return image_path, cleanup_paths
+    if isinstance(image_value, PILImage.Image):
+        pil_image = image_value
+    else:
+        pil_image = PILImage.fromarray(np.array(image_value))
+    image_path = os.path.join(output_dir, f"{sample_id}_image.png")
+    pil_image.save(image_path)
+    cleanup_paths.append(image_path)
+    return image_path, cleanup_paths
 
-    for idx, sample in enumerate(subset):
-        task_type = sample.get('task_type', 'Unknown')
-        sample_id = sample.get('id', f'sample_{idx}')
-        
-        stats[task_type]['total'] += 1
-        
-        print(f"[{idx+1}/{len(subset)}] Processing {sample_id} ({task_type})...")
-        
+
+def _coerce_video_path(video_value, *, output_dir: str, sample_id: str) -> Tuple[str, List[str]]:
+    cleanup_paths: List[str] = []
+    if isinstance(video_value, str):
+        if not os.path.exists(video_value):
+            raise FileNotFoundError(f"Video path does not exist: {video_value}")
+        return video_value, cleanup_paths
+    if isinstance(video_value, dict) and video_value.get("path"):
+        video_path = video_value["path"]
+        if not os.path.exists(video_path):
+            raise FileNotFoundError(f"Video path does not exist: {video_path}")
+        return video_path, cleanup_paths
+    if isinstance(video_value, bytes):
+        video_path = os.path.join(output_dir, f"{sample_id}_video.mp4")
+        with open(video_path, 'wb') as f:
+            f.write(video_value)
+        cleanup_paths.append(video_path)
+        return video_path, cleanup_paths
+    raise ValueError(f"Unsupported video format for sample {sample_id}: {type(video_value)}")
+
+
+def _resolve_render_reference_video_path(rows, *, output_dir: str) -> Tuple[Optional[str], List[str]]:
+    cleanup_paths: List[str] = []
+    for idx, sample in enumerate(rows):
+        video_value = sample.get('video')
+        if video_value is None:
+            continue
         try:
-            if task_type == 'Text-to-Lottie':
-                # Text-to-Lottie generation
-                text_prompt = sample['text']
-                print(f"  Text: {text_prompt[:80]}...")
-                
-                # Generate using run_inference
-                output_path = os.path.join(output_base, f'{sample_id}.json')
+            video_path, extra_cleanup = _coerce_video_path(video_value, output_dir=output_dir, sample_id=f'render_ref_{idx}')
+            cleanup_paths.extend(extra_cleanup)
+            return video_path, cleanup_paths
+        except Exception:
+            continue
+    return None, cleanup_paths
+
+
+def _select_bench_sample(split: str, task_label: str, max_samples: int = 1) -> Tuple[dict, List[str]]:
+    data_root = Path(BENCH_DATA_ROOT)
+    parquet_path = data_root / f"{split}-00000-of-00001.parquet"
+    if not parquet_path.exists():
+        raise FileNotFoundError(f"Benchmark parquet not found: {parquet_path}")
+def _run_single_bench_task_inference(args, cfg, model, processor, subset, split: str, task_key: str, device):
+    requested_label = _bench_task_label(task_key)
+    print(f"  Requested task: {task_key} ({requested_label})")
+
+    selected = []
+    table = subset.data.table
+    for idx in range(len(subset)):
+        row = table.slice(idx, 1).to_pydict()
+        sample = {k: v[0] for k, v in row.items()}
+        if not _sample_task_matches(sample, task_key):
+            continue
+        selected.append((idx, sample))
+        if args.max_samples is not None and args.max_samples > 0 and len(selected) >= args.max_samples:
+            break
+
+    print(f"  Selected samples: {len(selected)}")
+    if not selected:
+        raise RuntimeError(f"No samples found for task '{task_key}' in split '{split}'")
+
+    output_base = os.path.join(args.output_dir, f'mmlottie_bench_{split}_{task_key}')
+    os.makedirs(output_base, exist_ok=True)
+
+    stats = {task_key: {'success': 0, 'fail': 0, 'total': 0}}
+
+    print()
+    print('=' * 60)
+    print(f"Starting benchmark inference for {requested_label}...")
+    print('=' * 60)
+    print()
+
+    for idx, sample in selected:
+        sample_task_key = _normalize_task_type(sample.get('task_type'))
+        sample_id = sample.get('id', f'sample_{idx}')
+        _validate_bench_sample_fields(sample, task_key)
+        stats[task_key]['total'] += 1
+        print(f"[{idx+1}/{len(subset)}] Processing {sample_id} ({sample_task_key})...")
+        cleanup_paths = []
+        try:
+            output_path = os.path.join(output_base, f'{sample_id}.json')
+            reference_video_path = None
+            if task_key == 'video2lottie' and sample.get('video') is not None:
+                try:
+                    reference_video_path, extra_cleanup = _coerce_video_path(sample['video'], output_dir=output_base, sample_id=f'ref_{sample_id}')
+                    cleanup_paths.extend(extra_cleanup)
+                except Exception:
+                    reference_video_path = None
+
+            if task_key == 'text2lottie':
+                text_prompt = _build_text_only_prompt(sample)
+                print(f"  Text: {text_prompt[:120]}{'...' if len(text_prompt) > 120 else ''}")
                 lottie_json, info = run_inference(
                     model=model,
                     processor=processor,
                     task_type=TASK_TEXT,
                     device=device,
                     cfg=cfg,
+                    uid=str(sample_id),
                     text_description=text_prompt,
                     use_sampling=args.use_sampling,
                     temperature=args.temperature,
@@ -1041,43 +1349,27 @@ def run_mmlottie_bench_inference(args, cfg):
                     top_k=args.top_k,
                     repetition_penalty=args.repetition_penalty,
                     output_path=output_path,
-                    verbose=False
+                    save_mp4=True,
+                    render_reference_video_path=None,
+                    verbose=False,
                 )
-                
-                if lottie_json is not None:
-                    print(f"  ✅ Saved to {output_path}")
-                    stats[task_type]['success'] += 1
-                else:
-                    print(f"  ❌ Generation failed")
-                    stats[task_type]['fail'] += 1
-                
-            elif task_type == 'Text-Image-to-Lottie':
-                # Image + Text to Lottie generation
-                image = sample['image']  # PIL Image from datasets
-                text_prompt = sample.get('text', 'A simple animation')
-                
-                print(f"  Text: {text_prompt[:80]}...")
-                print(f"  Image size: {image.size}")
-                
-                # Resize image if needed
-                if image.size != (448, 448):
-                    image = image.resize((448, 448), PILImage.LANCZOS)
-                
-                # Save image to temp file
-                import tempfile
-                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_img:
-                    image.save(tmp_img.name)
-                    tmp_img_path = tmp_img.name
-                
-                # Generate using run_inference
-                output_path = os.path.join(output_base, f'{sample_id}.json')
+            elif task_key == 'text_image2lottie':
+                image_value = sample.get('image')
+                text_prompt = _infer_text_prompt(sample)
+                if image_value is None:
+                    raise ValueError('Missing image field for text_image2lottie sample')
+                image_path, extra_cleanup = _coerce_image_path(image_value, output_dir=output_base, sample_id=str(sample_id))
+                cleanup_paths.extend(extra_cleanup)
+                print(f"  Text: {text_prompt[:120]}{'...' if len(text_prompt) > 120 else ''}")
+                print(f"  Image: {image_path}")
                 lottie_json, info = run_inference(
                     model=model,
                     processor=processor,
                     task_type=TASK_IMAGE,
                     device=device,
                     cfg=cfg,
-                    image_path=tmp_img_path,
+                    uid=str(sample_id),
+                    image_path=image_path,
                     text_description=text_prompt,
                     use_sampling=args.use_sampling,
                     temperature=args.temperature,
@@ -1085,179 +1377,223 @@ def run_mmlottie_bench_inference(args, cfg):
                     top_k=args.top_k,
                     repetition_penalty=args.repetition_penalty,
                     output_path=output_path,
-                    verbose=False
+                    save_mp4=True,
+                    render_reference_video_path=None,
+                    verbose=False,
                 )
-
-                # Cleanup temp file
-                os.unlink(tmp_img_path)
-
-                if lottie_json is not None:
-                    print(f"  ✅ Saved to {output_path}")
-                    stats[task_type]['success'] += 1
-                else:
-                    print(f"  ❌ Generation failed")
-                    stats[task_type]['fail'] += 1
-
-            elif task_type == 'Video-to-Lottie':
-                # Video to Lottie generation
-                video_data = sample['video']
-
-                # For VideoReader objects, skip (can't extract easily)
-                if str(type(video_data).__name__) == 'VideoReader':
-                    print(f"  ⚠️  VideoReader format not supported, skipping")
-                    stats[task_type]['fail'] += 1
-                    continue
-
-                # Save video to temp file for processing
-                import tempfile
-                tmp_video_path = None
-                try:
-                    with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp_video:
-                        if isinstance(video_data, bytes):
-                            tmp_video.write(video_data)
-                            tmp_video_path = tmp_video.name
-                        elif isinstance(video_data, dict) and 'path' in video_data:
-                            tmp_video_path = video_data['path']
-                        else:
-                            print(f"  ⚠️  Unknown video format: {type(video_data)}")
-                            stats[task_type]['fail'] += 1
-                            continue
-
-                    print(f"  Video: {tmp_video_path}")
-
-                    # Generate using run_inference
-                    output_path = os.path.join(output_base, f'{sample_id}.json')
-                    lottie_json, info = run_inference(
-                        model=model,
-                        processor=processor,
-                        task_type=TASK_VIDEO,
-                        device=device,
-                        cfg=cfg,
-                        video_path=tmp_video_path,
-                        use_sampling=args.use_sampling,
-                        temperature=args.temperature,
-                        top_p=args.top_p,
-                        top_k=args.top_k,
-                        repetition_penalty=args.repetition_penalty,
-                        output_path=output_path,
-                        verbose=False
-                    )
-
-                    if lottie_json is not None:
-                        print(f"  ✅ Saved to {output_path}")
-                        stats[task_type]['success'] += 1
-                    else:
-                        print(f"  ❌ Generation failed")
-                        stats[task_type]['fail'] += 1
-
-                finally:
-                    # Cleanup temp file if it was bytes
-                    if tmp_video_path and isinstance(video_data, bytes):
-                        try:
-                            os.unlink(tmp_video_path)
-                        except:
-                            pass
-
+            elif task_key == 'video2lottie':
+                video_value = sample.get('video')
+                if video_value is None:
+                    raise ValueError('Missing video field for video2lottie sample')
+                if VideoReader is None or cpu is None:
+                    raise ImportError('video2lottie requires decord to be installed')
+                video_path, extra_cleanup = _coerce_video_path(video_value, output_dir=output_base, sample_id=str(sample_id))
+                cleanup_paths.extend(extra_cleanup)
+                print(f"  Video: {video_path}")
+                lottie_json, info = run_inference(
+                    model=model,
+                    processor=processor,
+                    task_type=TASK_VIDEO,
+                    device=device,
+                    cfg=cfg,
+                    uid=str(sample_id),
+                    video_path=video_path,
+                    text_description=None,
+                    use_sampling=args.use_sampling,
+                    temperature=args.temperature,
+                    top_p=args.top_p,
+                    top_k=args.top_k,
+                    repetition_penalty=args.repetition_penalty,
+                    output_path=output_path,
+                    save_mp4=True,
+                    render_reference_video_path=reference_video_path,
+                    verbose=False,
+                )
             else:
-                print(f"  ⚠️  Unknown task type: {task_type}")
-                stats[task_type]['fail'] += 1
+                raise ValueError(f"Unsupported task type: {task_key}")
 
-            # Clear cache
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            if torch.xpu.is_available():
-                torch.xpu.empty_cache()
-
+            if lottie_json is not None:
+                print(f"  ✅ Saved to {output_path}")
+                print(f"  ✅ Preview: {output_path.replace('.json', '.html')}")
+                stats[task_key]['success'] += 1
+            else:
+                print("  ❌ Generation failed")
+                stats[task_key]['fail'] += 1
         except Exception as e:
             print(f"  ❌ Error: {e}")
             if args.debug:
                 traceback.print_exc()
+            stats[task_key]['fail'] += 1
+        finally:
+            for path in cleanup_paths:
+                try:
+                    if os.path.exists(path):
+                        os.unlink(path)
+                except Exception:
+                    pass
 
-    # 7. Print summary
-    print(f"\n{'='*60}")
-    print("Benchmark Inference Complete!")
-    print(f"{'='*60}")
-    for task_type, task_stats in stats.items():
-        if task_stats['total'] > 0:
-            success_rate = task_stats['success'] / task_stats['total'] * 100
-            print(f"{task_type}:")
-            print(f"  Success: {task_stats['success']}/{task_stats['total']} ({success_rate:.1f}%)")
-            print(f"  Failed: {task_stats['fail']}/{task_stats['total']}")
-    print(f"\nOutput directory: {output_base}")
-    print(f"{'='*60}")
+    print()
+    print('=' * 60)
+    print(f"Benchmark Inference Complete for {requested_label}!")
+    print('=' * 60)
+    task_stats = stats[task_key]
+    if task_stats['total'] > 0:
+        success_rate = task_stats['success'] / task_stats['total'] * 100
+        print(f"{task_key}:")
+        print(f"  Success: {task_stats['success']}/{task_stats['total']} ({success_rate:.1f}%)")
+        print(f"  Failed: {task_stats['fail']}/{task_stats['total']}")
+    print()
+    print(f"Output directory: {output_base}")
+    print('=' * 60)
+    return stats
 
 
-def run_single_inference(args, cfg):
+def run_mmlottie_bench_inference(args, cfg):
+    """
+    Inference on MMLottieBench dataset from HuggingFace.
+    Runs one benchmark task per invocation.
+    """
     device = torch.device("cuda:0" if torch.cuda.is_available() else "xpu:0" if torch.xpu.is_available() else "cpu")
-    
+    print(f"Using device: {device}")
+
+    print()
+    print("Loading MMLottieBench dataset...")
+    try:
+        if os.path.exists(args.mmlottie_bench_dir) and os.path.isdir(args.mmlottie_bench_dir):
+            try:
+                print(f"  Attempting to load from local: {args.mmlottie_bench_dir}")
+                dataset = load_from_disk(args.mmlottie_bench_dir)
+                print("  ✅ Loaded from local directory")
+            except Exception as e:
+                print(f"  ⚠️  Local load failed: {e}")
+                print("  Downloading from HuggingFace...")
+                dataset = load_dataset("OmniLottie/MMLottieBench")
+        else:
+            print("  Local directory not found, downloading from HuggingFace...")
+            dataset = load_dataset("OmniLottie/MMLottieBench")
+        print(f"  Available splits: {list(dataset.keys())}")
+    except Exception as e:
+        print()
+        print(f"❌ Failed to load dataset: {e}")
+        print("Please check your network or download manually using:")
+        print("  python download_mmlottie_bench.py")
+        raise
+
+    if args.split not in dataset:
+        raise ValueError(f"Split '{args.split}' not found in dataset. Available: {list(dataset.keys())}")
+
+    subset = dataset[args.split]
+    print()
+    print(f"Processing split: {args.split}")
+    print(f"  Total samples: {len(subset)}")
+
+    print()
     print("Loading model...")
     processor = AutoProcessor.from_pretrained(cfg['tokenizer_name'], padding_side="left")
     processor.tokenizer.padding_side = "left"
-    
     model = LottieDecoder(pix_len=cfg['pix_len'], text_len=cfg['text_len'])
-    
-    model_path = os.path.join(args.sketch_weight, 'pytorch_model.bin')
-    safetensors_path = os.path.join(args.sketch_weight, 'model.safetensors')
-    
-    if os.path.exists(model_path):
-        model.load_state_dict(torch.load(model_path, map_location='cpu'))
-    elif os.path.exists(safetensors_path):
-        model.load_state_dict(load_file(safetensors_path))
-    
+    load_model_weights_into_decoder(model, args.sketch_weight, strict=False)
     model = model.to(device).eval()
-    
+
+    requested_task = _normalize_task_type(args.mmlottie_task)
+    if requested_task not in BENCH_TASK_LABELS:
+        raise ValueError(f"Unsupported benchmark task: {requested_task}")
+
+    stats = _run_single_bench_task_inference(args, cfg, model, processor, subset, args.split, requested_task, device)
+    task_stats = stats[requested_task]
+    print()
+    print("Benchmark task summary:")
+    if task_stats['total'] > 0:
+        success_rate = task_stats['success'] / task_stats['total'] * 100
+        print(f"{requested_task}: {task_stats['success']}/{task_stats['total']} ({success_rate:.1f}%), failed={task_stats['fail']}")
+def run_single_inference(args, cfg):
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "xpu:0" if torch.xpu.is_available() else "cpu")
+
+    print("Loading model...")
+    processor = AutoProcessor.from_pretrained(cfg['tokenizer_name'], padding_side="left")
+    processor.tokenizer.padding_side = "left"
+
+    model = LottieDecoder(pix_len=cfg['pix_len'], text_len=cfg['text_len'])
+    load_model_weights_into_decoder(model, args.sketch_weight, strict=False)
+    model = model.to(device).eval()
+
     os.makedirs(args.output_dir, exist_ok=True)
-    
-    if args.single_video:
-        task = TASK_VIDEO
-        out_path = os.path.join(args.output_dir, 'single_video_result.json')
-        lottie_json, info = run_inference(
-            model=model, processor=processor, task_type=task, device=device, cfg=cfg,
-            uid=None,
-            video_path=args.single_video,
-            use_sampling=args.use_sampling,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            top_k=args.top_k,
-            repetition_penalty=args.repetition_penalty,
-            output_path=out_path,
-            verbose=True)
-    elif args.single_image:
-        task = TASK_IMAGE
-        out_path = os.path.join(args.output_dir, 'single_image_result.json')
-        lottie_json, info = run_inference(
-            model=model, processor=processor, task_type=task, device=device, cfg=cfg,
-            uid=None,
-            image_path=args.single_image,
-            text_description=args.single_text or "Animate this image",
-            use_sampling=args.use_sampling,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            top_k=args.top_k,
-            repetition_penalty=args.repetition_penalty,
-            output_path=out_path,
-            verbose=True)
-    elif args.single_text:
-        task = TASK_TEXT
+
+    task_mode = _normalize_task_type(getattr(args, "task_mode", None))
+    if task_mode == "text2lottie":
+        text_prompt = args.single_text_prompt or args.single_text or "Generate a vivid Lottie animation."
         out_path = os.path.join(args.output_dir, 'single_text_result.json')
         lottie_json, info = run_inference(
-            model=model, processor=processor, task_type=task, device=device, cfg=cfg,
+            model=model,
+            processor=processor,
+            task_type=TASK_TEXT,
+            device=device,
+            cfg=cfg,
             uid=None,
-            text_description=args.single_text,
+            text_description=text_prompt,
             use_sampling=args.use_sampling,
             temperature=args.temperature,
             top_p=args.top_p,
             top_k=args.top_k,
             repetition_penalty=args.repetition_penalty,
             output_path=out_path,
-            verbose=True)
+            save_mp4=True,
+            verbose=True,
+        )
+    elif task_mode == "text_image2lottie":
+        image_path = args.single_image_path or args.single_image
+        if not image_path:
+            raise ValueError("text_image2lottie requires --single_image_path/--single_image")
+        text_prompt = args.single_text_prompt or args.single_text or "Describe this image and animate it."
+        out_path = os.path.join(args.output_dir, 'single_text_image_result.json')
+        lottie_json, info = run_inference(
+            model=model,
+            processor=processor,
+            task_type=TASK_IMAGE,
+            device=device,
+            cfg=cfg,
+            uid=None,
+            image_path=image_path,
+            text_description=text_prompt,
+            use_sampling=args.use_sampling,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=args.top_k,
+            repetition_penalty=args.repetition_penalty,
+            output_path=out_path,
+            save_mp4=True,
+            verbose=True,
+        )
+    elif task_mode == "video2lottie":
+        video_path = args.single_video_path or args.single_video
+        if not video_path:
+            raise ValueError("video2lottie requires --single_video_path/--single_video")
+        out_path = os.path.join(args.output_dir, 'single_video_result.json')
+        lottie_json, info = run_inference(
+            model=model,
+            processor=processor,
+            task_type=TASK_VIDEO,
+            device=device,
+            cfg=cfg,
+            uid=None,
+            video_path=video_path,
+            text_description=None,
+            use_sampling=args.use_sampling,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=args.top_k,
+            repetition_penalty=args.repetition_penalty,
+            output_path=out_path,
+            save_mp4=True,
+            verbose=True,
+        )
     else:
-        print("ERROR: Must specify --single_video, --single_image, or --single_text")
-        return
-    
+        raise ValueError(f"Unsupported task_mode: {task_mode}")
+
     if lottie_json:
         print("\n✓ Generation successful!")
         print(f"  Output: {out_path}")
+        print(f"  HTML Preview: {out_path.replace('.json', '.html')}")
         print(f"  Layers: {len(lottie_json.get('layers', []))}")
         print(f"  Tokens generated: {info.get('generated_len', 0)}")
     else:
@@ -1269,8 +1605,9 @@ if __name__ == "__main__":
     
     parser.add_argument("--sketch_weight", type=str, required=True,
                         help="Path to model checkpoint directory")
-    parser.add_argument("--tokenizer_name", type=str, 
-                        default="Qwen/Qwen2.5-VL-3B-Instruct")
+    parser.add_argument("--tokenizer_name", type=str,
+                        default="Qwen/Qwen3.5-9B",
+                        help="Processor/tokenizer path. Must match the base model used by LottieDecoder (Qwen3.5-9B).")
     
     parser.add_argument("--output_dir", type=str, default="./output")
     
@@ -1293,18 +1630,19 @@ if __name__ == "__main__":
 
     parser.add_argument("--max_samples", type=int, default=-1,
                         help="Maximum samples to process (-1 = all)")
-    parser.add_argument("--task_filter", type=str, choices=['video', 'image', 'text', None],
+    parser.add_argument("--task_filter", type=str,
+                        choices=['video', 'image', 'text', 'text2lottie', 'text_image2lottie', 'video2lottie'],
                         default=None, help="Only process specific task type")
     parser.add_argument("--shuffle", action="store_true", default=True,
                         help="Shuffle samples before processing")
-    
+
     parser.add_argument("--single_video", type=str, default=None,
                         help="Path to single video for inference")
     parser.add_argument("--single_image", type=str, default=None,
                         help="Path to single image for inference")
     parser.add_argument("--single_text", type=str, default=None,
                         help="Text prompt for single inference")
-    
+
     # MMLottie Benchmark模式
     parser.add_argument("--mmlottie_bench_dir", type=str, default="./mmlottie_bench",
                         help="Path to mmlottie_bench directory (default: ./mmlottie_bench)")
@@ -1312,8 +1650,19 @@ if __name__ == "__main__":
                         help="Split to use from mmlottie_bench (real or synthetic)")
     parser.add_argument("--mmlottie_task", type=str,
                         choices=['text2lottie', 'text_image2lottie', 'video2lottie'],
-                        default=None,
-                        help="Specific task to run in mmlottie_bench (default: run all tasks)")
+                        default='text2lottie',
+                        help="Specific task to run in mmlottie_bench")
+    parser.add_argument("--task_mode", type=str,
+                        choices=['text2lottie', 'text_image2lottie', 'video2lottie'],
+                        default='text2lottie',
+                        help="Explicit task mode for single-sample inference")
+
+    parser.add_argument("--single_image_path", type=str, default=None,
+                        help="Alias of --single_image for task-mode inference")
+    parser.add_argument("--single_video_path", type=str, default=None,
+                        help="Alias of --single_video for task-mode inference")
+    parser.add_argument("--single_text_prompt", type=str, default=None,
+                        help="Alias of --single_text for task-mode inference")
 
     parser.add_argument("--batch_text_file", type=str, default=None,
                         help="Path to text file with prompts (one per line) for batch text2lottie generation")
@@ -1325,6 +1674,8 @@ if __name__ == "__main__":
 
     parser.add_argument("--num_candidates", type=int, default=1,
                         help="Number of candidates to generate (for Best-of-N selection, default: 1)")
+    parser.add_argument("--no_save_mp4", action="store_true",
+                        help="Disable MP4 rendering for generated Lottie JSON")
 
     args = parser.parse_args()
     
@@ -1349,7 +1700,7 @@ if __name__ == "__main__":
         print(f"🆕 Num candidates: {args.num_candidates} (Best-of-{args.num_candidates})")
     print("=" * 60)
     
-    if args.single_video or args.single_image or args.single_text:
+    if args.single_video or args.single_image or args.single_text or args.single_video_path or args.single_image_path or args.single_text_prompt:
         print("\nRunning single sample inference...")
         run_single_inference(args, cfg)
     elif args.batch_text_file:
@@ -1359,7 +1710,6 @@ if __name__ == "__main__":
         print(f"  Input file: {args.batch_text_file}")
         run_batch_text_file_inference(args, cfg)
     elif args.split:
-        # MMLottie Benchmark mode
         print(f"\nRunning MMLottie Benchmark inference")
         print(f"  Split: {args.split}")
         if args.mmlottie_bench_dir and os.path.exists(args.mmlottie_bench_dir):
@@ -1367,11 +1717,10 @@ if __name__ == "__main__":
         else:
             print(f"  Will download from HuggingFace if needed")
         run_mmlottie_bench_inference(args, cfg)
-
     else:
         print("\nError: No input specified!")
         print("Please provide one of:")
-        print("  - --single_video, --single_image, or --single_text for single sample inference")
+        print("  - --task_mode text2lottie|text_image2lottie|video2lottie and matching single_* args")
         print("  - --batch_text_file <path> for batch text2lottie generation")
         print("  - --split [real|synthetic] for MMLottie benchmark inference")
         exit(1)

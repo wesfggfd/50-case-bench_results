@@ -60,8 +60,11 @@ REPORT_PATH = Path('/root/SVG Generation/OmniLottie/reproduction_results/core_me
 I3D_URL = 'https://www.dropbox.com/s/ge9e5ujwgetktms/i3d_torchscript.pt?dl=1'
 MODEL_CACHE_DIR = '/root/SVG Generation/OmniLottie/loaded_models'
 SAMPLE_SEED = 42
-NUM_FRAMES = 16
-FRAME_SIZE = 224
+BENCH_VIDEO_FPS = 8.0
+BENCH_VIDEO_WIDTH = 336
+BENCH_VIDEO_HEIGHT = 336
+BENCH_VIDEO_FRAME_COUNT = 16
+EVAL_EVAL_FRAME_SIZE = 224
 BATCH_SIZE = 4
 FEATURE_DETECTOR_CACHE = {}
 
@@ -115,7 +118,7 @@ def load_bench():
     return {split: dataset[split].cast_column('video', Video(decode=False)) for split in BENCH_FILES}
 
 
-def load_video_frames_cv2(path: str, num_frames: int = NUM_FRAMES, size: int = FRAME_SIZE) -> np.ndarray:
+def load_video_frames_cv2(path: str, num_frames: int = BENCH_VIDEO_FRAME_COUNT, size: int = EVAL_EVAL_FRAME_SIZE) -> np.ndarray:
     cap = cv2.VideoCapture(path)
     frames = []
     while True:
@@ -140,7 +143,7 @@ def load_video_frames_cv2(path: str, num_frames: int = NUM_FRAMES, size: int = F
     return np.stack(picked)
 
 
-def load_video_frames_from_bytes(video_bytes: bytes, num_frames: int = NUM_FRAMES, size: int = FRAME_SIZE) -> np.ndarray:
+def load_video_frames_from_bytes(video_bytes: bytes, num_frames: int = BENCH_VIDEO_FRAME_COUNT, size: int = EVAL_EVAL_FRAME_SIZE) -> np.ndarray:
     tmp = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False)
     try:
         tmp.write(video_bytes)
@@ -153,7 +156,7 @@ def load_video_frames_from_bytes(video_bytes: bytes, num_frames: int = NUM_FRAME
             pass
 
 
-def load_video_frames_from_field(video_field, num_frames: int = NUM_FRAMES, size: int | tuple[int, int] | None = FRAME_SIZE) -> np.ndarray:
+def load_video_frames_from_field(video_field, num_frames: int = BENCH_VIDEO_FRAME_COUNT, size: int | tuple[int, int] | None = EVAL_EVAL_FRAME_SIZE) -> np.ndarray:
     if isinstance(video_field, dict) and video_field.get('bytes') is not None:
         return load_video_frames_from_bytes(video_field['bytes'], num_frames=num_frames, size=size)
     if isinstance(video_field, dict) and video_field.get('path'):
@@ -174,7 +177,7 @@ def composite_on_background(img: Image.Image, background=(255, 255, 255)) -> Ima
 
 def render_sampled_lottie_frames(
     json_path: Path,
-    num_frames: int = NUM_FRAMES,
+    num_frames: int = BENCH_VIDEO_FRAME_COUNT,
     target_size: tuple[int, int] | None = None,
     background=(255, 255, 255),
 ) -> np.ndarray:
@@ -358,8 +361,8 @@ def compute_gt_stats(device: str, target_count: int, force: bool = False):
         'sample_target_count': total_available,
         'feature_count': stats.count,
         'decode_failures': failed,
-        'num_frames': NUM_FRAMES,
-        'frame_size': FRAME_SIZE,
+        'num_frames': BENCH_VIDEO_FRAME_COUNT,
+        'frame_size': EVAL_FRAME_SIZE,
         'device': device,
     }
     save_stats(gt_stats_path, stats, meta)
@@ -426,7 +429,7 @@ def compute_clip_for_rows(split: str, task_key: str, rows, device: str):
             continue
         try:
             render_path = ensure_render(split, task_key, sample_id, result_dir)
-            frames = load_video_frames_cv2(str(render_path), num_frames=8, size=FRAME_SIZE)
+            frames = load_video_frames_cv2(str(render_path), num_frames=8, size=EVAL_FRAME_SIZE)
             with torch.no_grad():
                 imgs = torch.stack([clip_pre(Image.fromarray(x)) for x in frames]).to(device)
                 txt = clip_tok([row['text']]).to(device)
@@ -510,8 +513,8 @@ def main():
             'results_root': '/root/SVG Generation/results/official_rerun',
             'fvd_gt_source': 'MMLottie-2M',
             'fvd_sample_seed': SAMPLE_SEED,
-            'num_frames': NUM_FRAMES,
-            'frame_size': FRAME_SIZE,
+            'num_frames': BENCH_VIDEO_FRAME_COUNT,
+            'frame_size': EVAL_FRAME_SIZE,
             'device': device,
         },
         'notes': [
