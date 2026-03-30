@@ -15,13 +15,18 @@ from PIL import Image
 from lottie.exporters.video import export_video
 from lottie.parsers.tgs import parse_tgs
 
-API_URL = 'https://aiapi.cxyquan.com/v1/messages'
-API_KEY = 'sk-SmgUodnjVrKR6OGrZ51GcZL8G7QoFuoUMiFS5wOGL7iKGfM5'
-MODEL = 'claude-sonnet-4-6'
-HEADERS = {
-    'Authorization': f'Bearer {API_KEY}',
-    'Content-Type': 'application/json',
-}
+API_URL = os.environ.get('BENCH_JUDGE_API_URL', 'https://aiapi.cxyquan.com/v1/messages')
+API_KEY = os.environ.get('BENCH_JUDGE_API_KEY')
+MODEL = os.environ.get('BENCH_JUDGE_MODEL', 'claude-sonnet-4-6')
+
+
+def build_headers():
+    if not API_KEY:
+        raise RuntimeError('Missing BENCH_JUDGE_API_KEY environment variable for judge evaluation')
+    return {
+        'Authorization': f'Bearer {API_KEY}',
+        'Content-Type': 'application/json',
+    }
 BENCH_FILES = {
     'real': os.environ.get('MMLOTTIE_BENCH_REAL', '/root/SVG Generation/downloads/bench/MMLottieBench/data/real-00000-of-00001.parquet'),
     'synthetic': os.environ.get('MMLOTTIE_BENCH_SYNTHETIC', '/root/SVG Generation/downloads/bench/MMLottieBench/data/synthetic-00000-of-00001.parquet'),
@@ -45,8 +50,8 @@ BENCH_VIDEO_FRAME_COUNT = 16
 JUDGE_FRAME_SIZE = 224
 RENDER_CACHE = Path('/root/SVG Generation/results/render_cache_official')
 CACHE_ROOT = Path('/root/SVG Generation/results/judge_cache_official_claude46')
-REPORT_PATH = Path('/root/SVG Generation/OmniLottie/reproduction_results/judge_metrics_report.json')
-LOG_PATH = Path('/root/SVG Generation/results/judge_metrics_official.log')
+REPORT_PATH = Path(os.environ.get('MMLOTTIE_JUDGE_REPORT_PATH', '/root/SVG Generation/OmniLottie/reproduction_results/judge_metrics_report.json'))
+LOG_PATH = Path(os.environ.get('MMLOTTIE_JUDGE_LOG_PATH', '/root/SVG Generation/results/judge_metrics_official.log'))
 
 OBJ_PROMPT = """You are a professional animation evaluator tasked with assessing AI-generated Lottie animations. Your response must strictly follow this JSON format:
 {"object_consistency_score": <score>, "object_reasoning": "..."}
@@ -161,7 +166,7 @@ def call_claude(prompt_prefix: str, caption: str, frame_b64_list, max_retries: i
     last_error = None
     for attempt in range(1, max_retries + 1):
         try:
-            resp = requests.post(API_URL, headers=HEADERS, json=payload, timeout=120)
+            resp = requests.post(API_URL, headers=build_headers(), json=payload, timeout=120)
             resp.raise_for_status()
             return parse_anthropic_json(resp.json())
         except Exception as exc:

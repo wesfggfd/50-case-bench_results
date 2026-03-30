@@ -52,7 +52,7 @@ TASK_ORDER = ['text2lottie', 'text_image2lottie', 'video2lottie']
 MML2M_GLOB = '/root/SVG Generation/downloads/datasets/MMLottie-2M/data/**/*.parquet'
 RENDER_CACHE = Path('/root/SVG Generation/results/render_cache_official')
 FVD_CACHE = Path('/root/SVG Generation/results/fvd_cache')
-REPORT_PATH = Path('/root/SVG Generation/OmniLottie/reproduction_results/core_metrics_report.json')
+REPORT_PATH = Path(os.environ.get('MMLOTTIE_CORE_REPORT_PATH', '/root/SVG Generation/OmniLottie/reproduction_results/core_metrics_report.json'))
 I3D_URL = 'https://www.dropbox.com/s/ge9e5ujwgetktms/i3d_torchscript.pt?dl=1'
 MODEL_CACHE_DIR = '/root/SVG Generation/OmniLottie/loaded_models'
 SAMPLE_SEED = 42
@@ -358,7 +358,7 @@ def compute_gt_stats(device: str, target_count: int, force: bool = False):
         'feature_count': stats.count,
         'decode_failures': failed,
         'num_frames': BENCH_VIDEO_FRAME_COUNT,
-        'frame_size': EVAL_FRAME_SIZE,
+        'frame_size': EVAL_EVAL_FRAME_SIZE,
         'device': device,
     }
     save_stats(gt_stats_path, stats, meta)
@@ -425,7 +425,7 @@ def compute_clip_for_rows(split: str, task_key: str, rows, device: str):
             continue
         try:
             render_path = ensure_render(split, task_key, sample_id, result_dir)
-            frames = load_video_frames_cv2(str(render_path), num_frames=8, size=EVAL_FRAME_SIZE)
+            frames = load_video_frames_cv2(str(render_path), num_frames=8, size=EVAL_EVAL_FRAME_SIZE)
             with torch.no_grad():
                 imgs = torch.stack([clip_pre(Image.fromarray(x)) for x in frames]).to(device)
                 txt = clip_tok([row['text']]).to(device)
@@ -510,7 +510,7 @@ def main():
             'fvd_gt_source': 'MMLottie-2M',
             'fvd_sample_seed': SAMPLE_SEED,
             'num_frames': BENCH_VIDEO_FRAME_COUNT,
-            'frame_size': EVAL_FRAME_SIZE,
+            'frame_size': EVAL_EVAL_FRAME_SIZE,
             'device': device,
         },
         'notes': [

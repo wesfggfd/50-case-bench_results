@@ -1717,6 +1717,8 @@ if __name__ == "__main__":
 
     parser.add_argument("--max_samples", type=int, default=-1,
                         help="Maximum samples to process (-1 = all)")
+    parser.add_argument("--num_samples", type=str, default=None,
+                        help="Unified sample count interface: all or a positive integer. Overrides --max_samples when provided.")
     parser.add_argument("--task_filter", type=str,
                         choices=['video', 'image', 'text', 'text2lottie', 'text_image2lottie', 'video2lottie'],
                         default=None, help="Only process specific task type")
@@ -1765,7 +1767,20 @@ if __name__ == "__main__":
                         help="Disable MP4 rendering for generated Lottie JSON")
 
     args = parser.parse_args()
-    
+
+    if args.num_samples is not None:
+        raw_num_samples = str(args.num_samples).strip().lower()
+        if raw_num_samples == 'all':
+            args.max_samples = -1
+        else:
+            try:
+                parsed_num_samples = int(raw_num_samples)
+            except ValueError as exc:
+                raise ValueError(f"Invalid --num_samples value: {args.num_samples}. Use 'all' or a positive integer.") from exc
+            if parsed_num_samples <= 0:
+                raise ValueError(f"--num_samples must be 'all' or a positive integer, got: {args.num_samples}")
+            args.max_samples = parsed_num_samples
+
     cfg = {
         'tokenizer_name': args.tokenizer_name,
         'text_len': args.text_len,

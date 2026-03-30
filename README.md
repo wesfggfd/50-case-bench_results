@@ -115,6 +115,89 @@ This makes the repository both a:
 - benchmark script archive
 - benchmark result archive
 
+### Unified pipeline
+
+This repository now also provides a unified pipeline entrypoint.
+It is designed around **model families**, not just one fixed OmniLottie implementation.
+Current registered model types include:
+- `omnilottie_qwen35`
+- `omnilottie_original`
+- `deepseekv3`
+- `qwen35_base`
+- `recraft`
+
+Example for the built-in OmniLottie Qwen3.5 path:
+
+```bash
+python scripts/run_pipeline.py \
+  --model-type omnilottie_qwen35 \
+  --model-path /path/to/checkpoint \
+  --experiment-name omnilottie_real_synth_150 \
+  --num-samples 150 \
+  --split all \
+  --task all \
+  --run-core-eval
+```
+
+For model types without a built-in runner yet, provide a custom family runner:
+
+```bash
+python scripts/run_pipeline.py \
+  --model-type deepseekv3 \
+  --model-path /path/to/model_or_api_config \
+  --runner-script scripts/family_runner_stub.py \
+  --experiment-name deepseek_text_150 \
+  --num-samples 150 \
+  --split all \
+  --task text2lottie
+```
+
+Supported sample count values:
+- `--num-samples all`
+- `--num-samples 150`
+- `--num-samples N`
+
+Outputs are written under:
+
+```text
+results/pipeline_runs/<experiment-name>/
+```
+
+including:
+- per-task inference outputs
+- `manifest.json`
+- `predictions.jsonl`
+- `reports/core_metrics_report.json`
+- `reports/judge_metrics_report.json` when judge evaluation is enabled
+
+The pipeline does **not** require every model family to successfully generate renderable Lottie JSON on every sample.
+It only requires each family runner to execute normal inference and write its outputs/results honestly, including failures or unsupported tasks.
+
+### Judge evaluation credentials
+
+Judge evaluation no longer reads API credentials from source code.
+Set them through environment variables before running:
+
+```bash
+export BENCH_JUDGE_API_URL="https://.../v1/messages"
+export BENCH_JUDGE_API_KEY="your_api_key"
+export BENCH_JUDGE_MODEL="claude-sonnet-4-6"
+```
+
+Then run:
+
+```bash
+python scripts/run_pipeline.py \
+  --model-type omnilottie_qwen35 \
+  --model-path /path/to/checkpoint \
+  --experiment-name omnilottie_150_with_judge \
+  --num-samples 150 \
+  --split all \
+  --task all \
+  --run-core-eval \
+  --run-judge-eval
+```
+
 ---
 
 ## License
