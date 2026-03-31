@@ -80,6 +80,11 @@ and the task types:
 - Text-Image-to-Lottie
 - Video-to-Lottie
 
+The benchmark runner reads each sample's `task_type` field from MMLottieBench and routes inference accordingly:
+- `Text-to-Lottie` → use `text` as the only input
+- `Text-Image-to-Lottie` → use `text + image` as inputs
+- `Video-to-Lottie` → use `video` as the only input
+
 The reports include metrics such as:
 - time
 - generated token count

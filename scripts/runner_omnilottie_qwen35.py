@@ -1258,7 +1258,22 @@ def _sample_task_key(sample: dict) -> Optional[str]:
     raw_task = sample.get("task_type")
     if raw_task is None:
         return None
-    return _normalize_task_type(raw_task)
+    normalized = _normalize_task_type(raw_task)
+    if normalized in BENCH_TASK_LABELS:
+        return normalized
+    for task_key, label in BENCH_TASK_LABELS.items():
+        if str(raw_task).strip().lower() == label.strip().lower():
+            return task_key
+    return normalized
+
+
+def _resolve_sample_task_key(sample: dict, requested_task: Optional[str] = None) -> str:
+    sample_task = _sample_task_key(sample)
+    if sample_task is not None:
+        return sample_task
+    if requested_task is not None:
+        return _normalize_task_type(requested_task)
+    raise ValueError("Unable to resolve task type from sample or requested task")
 
 
 def _infer_text_prompt(sample: dict) -> str:
@@ -1299,8 +1314,6 @@ def _validate_bench_sample_fields(sample: dict, task_key: str) -> None:
         if video_value is not None:
             raise ValueError('text_image2lottie sample must not contain video input')
     elif task_key == 'video2lottie':
-        if not text_value:
-            raise ValueError('video2lottie sample is missing text')
         if video_value is None:
             raise ValueError('video2lottie sample is missing video')
         if image_value is not None:
@@ -1401,23 +1414,23 @@ def _run_single_bench_task_inference(args, cfg, model, processor, subset, split:
     print()
 
     for idx, sample in selected:
-        sample_task_key = _normalize_task_type(sample.get('task_type'))
+        sample_task_key = _resolve_sample_task_key(sample, task_key)
         sample_id = sample.get('id', f'sample_{idx}')
-        _validate_bench_sample_fields(sample, task_key)
+        _validate_bench_sample_fields(sample, sample_task_key)
         stats[task_key]['total'] += 1
         print(f"[{idx+1}/{len(subset)}] Processing {sample_id} ({sample_task_key})...")
         cleanup_paths = []
         try:
             output_path = os.path.join(output_base, f'{sample_id}.json')
             reference_video_path = None
-            if task_key == 'video2lottie' and sample.get('video') is not None:
+            if sample_task_key == 'video2lottie' and sample.get('video') is not None:
                 try:
                     reference_video_path, extra_cleanup = _coerce_video_path(sample['video'], output_dir=output_base, sample_id=f'ref_{sample_id}')
                     cleanup_paths.extend(extra_cleanup)
                 except Exception:
                     reference_video_path = None
 
-            if task_key == 'text2lottie':
+            if sample_task_key == 'text2lottie':
                 text_prompt = _build_text_only_prompt(sample)
                 print(f"  Text: {text_prompt[:120]}{'...' if len(text_prompt) > 120 else ''}")
                 lottie_json, info = run_inference(
@@ -1438,7 +1451,7 @@ def _run_single_bench_task_inference(args, cfg, model, processor, subset, split:
                     render_reference_video_path=None,
                     verbose=False,
                 )
-            elif task_key == 'text_image2lottie':
+            elif sample_task_key == 'text_image2lottie':
                 image_value = sample.get('image')
                 text_prompt = _infer_text_prompt(sample)
                 if image_value is None:
@@ -1466,7 +1479,7 @@ def _run_single_bench_task_inference(args, cfg, model, processor, subset, split:
                     render_reference_video_path=None,
                     verbose=False,
                 )
-            elif task_key == 'video2lottie':
+            elif sample_task_key == 'video2lottie':
                 video_value = sample.get('video')
                 if video_value is None:
                     raise ValueError('Missing video field for video2lottie sample')
@@ -1495,7 +1508,7 @@ def _run_single_bench_task_inference(args, cfg, model, processor, subset, split:
                     verbose=False,
                 )
             else:
-                raise ValueError(f"Unsupported task type: {task_key}")
+                raise ValueError(f"Unsupported task type: {sample_task_key}")
 
             if lottie_json is not None:
                 print(f"  ✅ Saved to {output_path}")
